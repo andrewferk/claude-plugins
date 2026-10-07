@@ -1,0 +1,38 @@
+{
+  "name": "andrewferk",
+  "owner": {
+    "name": "Andrew Ferk",
+    "url": "https://github.com/andrewferk"
+  },
+  "description": "Andrew Ferk's Claude Code plugins: guardrails and review loops for agentic TDD.",
+  "plugins": [
+    {
+      "name": "comment-guard",
+      "source": "./plugins/comment-guard",
+      "description": "Keeps LLM-written code free of restating, narrating, and document-citing comments. Delivers the policy by hook, tightens it for mattpocock skills, blocks edits that break it, and re-checks the branch before the agent stops.",
+      "category": "engineering",
+      "keywords": [
+        "comments",
+        "code-quality",
+        "hooks",
+        "tdd",
+        "adr"
+      ]
+    },
+    {
+      "name": "adversarial-code-review",
+      "source": {
+        "source": "github",
+        "repo": "andrewferk/adversarial-code-review"
+      },
+      "description": "Adversarial cross-model code review: a reviewer on a different model challenges your draft PR through the Cursor CLI, argues back in comments, and marks it ready only once both agree.",
+      "category": "engineering",
+      "keywords": [
+        "code-review",
+        "adversarial",
+        "cursor",
+        "pull-request"
+      ]
+    }
+  ]
+}
