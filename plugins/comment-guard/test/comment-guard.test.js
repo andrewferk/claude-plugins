@@ -98,10 +98,11 @@ test("comment markers inside strings are not comments", () => {
   assert.deepEqual(kinds(result), ["cites a document"]);
 });
 
-test("consecutive line comments are one comment reported at its first line", () => {
+test("consecutive line comments are one comment; a citation inside it is reported at the citing line", () => {
   const result = analyze(`const a = 1;\n\n// Letters, digits, '-' and '_' only. Other characters are excluded\n// because future routes depend on it (ADR 0002).\nconst RE = /x/;\n`);
   assert.equal(result.problems.length, 1);
-  assert.equal(result.problems[0].line, 3);
+  assert.equal(result.problems[0].line, 4);
+  assert.equal(result.problems[0].text, "because future routes depend on it (ADR 0002).");
 });
 
 test("python docstrings and hash comments are extracted", () => {
