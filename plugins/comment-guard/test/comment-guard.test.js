@@ -139,7 +139,7 @@ test("non-source files are skipped", () => {
 
 test("the PR #100 fixtures: every ADR citation is flagged and the why comments survive", () => {
   const shortCode = guard.analyzeFile(path.join(FIXTURES, "short-code.ts"), config);
-  assert.equal(shortCode.problems.filter((p) => p.kind === "cites a document").length, 5);
+  assert.equal(shortCode.problems.filter((p) => p.kind === "cites a document").length, 6, "lines 10 and 11 of one block each cite an ADR");
   assert.equal(shortCode.overBudget, true);
 
   const generator = guard.analyzeFile(path.join(FIXTURES, "generator.ts"), config);

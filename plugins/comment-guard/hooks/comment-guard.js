@@ -352,7 +352,9 @@ function analyzeSource(source, filePath, config) {
     const where = { line: comment.startLine, endLine: comment.endLine, text };
 
     if (isReference(text, config)) {
-      problems.push({ ...citingLine(comment, config), kind: "cites a document", fix: "delete it. The decision record already holds the reasoning; the link belongs in the commit trailer (Implements: ADR-NNNN / Refs: #NN), the test name, or the ADR's Implemented-by list." });
+      for (const where of citingLines(comment, config)) {
+        problems.push({ ...where, kind: "cites a document", fix: "delete it. The decision record already holds the reasoning; the link belongs in the commit trailer (Implements: ADR-NNNN / Refs: #NN), the test name, or the ADR's Implemented-by list." });
+      }
     } else if (BANNER_PATTERN.test(text)) {
       problems.push({ ...where, kind: "section banner", fix: "delete it; if the section needs a name, extract it into a function with that name." });
     } else if (comment.kind === "line" && !comment.trailing && DEAD_CODE_PATTERN.test(text) && /[=(){}:;]/.test(text)) {
@@ -372,11 +374,12 @@ function analyzeSource(source, filePath, config) {
   return { filePath, language, problems, ratio, overBudget, commentLines: extracted.commentLines, nonBlankLines: extracted.nonBlankLines, comments: extracted.comments };
 }
 
-function citingLine(comment, config) {
-  const index = (comment.lineTexts || []).findIndex((lineText) => isReference(lineText, config));
-  if (index === -1) return { line: comment.startLine, endLine: comment.endLine, text: comment.text };
-  const line = comment.startLine + index;
-  return { line, endLine: line, text: comment.lineTexts[index] };
+function citingLines(comment, config) {
+  const found = [];
+  (comment.lineTexts || []).forEach((lineText, index) => {
+    if (isReference(lineText, config)) found.push({ line: comment.startLine + index, endLine: comment.startLine + index, text: lineText });
+  });
+  return found.length > 0 ? found : [{ line: comment.startLine, endLine: comment.endLine, text: comment.text }];
 }
 
 function analyzeFile(filePath, config) {
