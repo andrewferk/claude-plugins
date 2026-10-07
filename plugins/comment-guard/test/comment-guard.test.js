@@ -32,6 +32,12 @@ test("a citation appended to an existing comment block is reported at its own li
   assert.equal(result.problems[0].text, "per ADR 0002");
 });
 
+test("every citing line in a block is its own problem", () => {
+  const result = analyze("// Public surface of the package (ADR 0015).\n// Workers import only what is exported here.\n// per ADR 0002\nexport const a = 1;\n");
+  assert.deepEqual(kinds(result), ["cites a document", "cites a document"]);
+  assert.deepEqual(result.problems.map((p) => [p.line, p.text]), [[1, "Public surface of the package (ADR 0015)."], [3, "per ADR 0002"]]);
+});
+
 test("a problem judged on a whole block reports the block's line range", () => {
   const result = analyze("// Now we validate the input\n// and then normalise it\nconst x = 1;\n");
   assert.deepEqual(kinds(result), ["narrates the steps"]);
