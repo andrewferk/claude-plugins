@@ -24,6 +24,23 @@ test("a comment citing an ADR is flagged", () => {
   assert.equal(result.problems[0].line, 1);
 });
 
+test("a citation appended to an existing comment block is reported at its own line", () => {
+  const result = analyze("// Public surface of the package.\n// Workers import only what is exported here.\n// per ADR 0002\nexport { createLink } from \"./create-link\";\n");
+  assert.deepEqual(kinds(result), ["cites a document"]);
+  assert.equal(result.problems[0].line, 3);
+  assert.equal(result.problems[0].endLine, 3);
+  assert.equal(result.problems[0].text, "per ADR 0002");
+});
+
+test("a problem judged on a whole block reports the block's line range", () => {
+  const result = analyze("// Now we validate the input\n// and then normalise it\nconst x = 1;\n");
+  assert.deepEqual(kinds(result), ["narrates the steps"]);
+  assert.equal(result.problems[0].line, 1);
+  assert.equal(result.problems[0].endLine, 2);
+  const report = guard.formatReport([result], config);
+  assert.match(report, /L1-L2 narrates the steps/);
+});
+
 test("issue, ticket, slice and spec-section references are flagged", () => {
   for (const text of ["// see ticket #94", "// (#94)", "// slice 1.2 of the plan", "// as required by spec section 3", "// per the ADR", "// PROJ-123 asked for this", "// see docs/adr/0009-keyed.md"]) {
     const result = analyze(`${text}\nconst x = 1;\n`);
@@ -258,6 +275,23 @@ test("Stop checks only files this session edited, reports only added lines, and 
 
   const second = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: true });
   assert.equal(second.stdout, "");
+});
+
+test("Stop catches a citation appended under a pre-existing comment block", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  run("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(dir, "index.ts"), "// Public surface of the package.\n// Workers import only what is exported here.\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "index.ts"), "// Public surface of the package.\n// Workers import only what is exported here.\n// per ADR 0002\nexport const a = 1;\n");
+
+  const session_id = `block-${process.pid}-${Date.now()}`;
+  runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "index.ts") }, cwd: dir, session_id });
+  const blocked = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
+  assert.notEqual(blocked.stdout, "", "the appended citation is an added line and must be reported");
+  const output = JSON.parse(blocked.stdout);
+  assert.match(output.reason, /index\.ts:\n  L3 cites a document: "per ADR 0002"/);
 });
 
 test("the CLI exits non-zero on problems and zero when clean", () => {
