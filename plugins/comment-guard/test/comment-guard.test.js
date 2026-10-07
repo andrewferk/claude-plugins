@@ -24,6 +24,29 @@ test("a comment citing an ADR is flagged", () => {
   assert.equal(result.problems[0].line, 1);
 });
 
+test("a citation appended to an existing comment block is reported at its own line", () => {
+  const result = analyze("// Public surface of the package.\n// Workers import only what is exported here.\n// per ADR 0002\nexport { createLink } from \"./create-link\";\n");
+  assert.deepEqual(kinds(result), ["cites a document"]);
+  assert.equal(result.problems[0].line, 3);
+  assert.equal(result.problems[0].endLine, 3);
+  assert.equal(result.problems[0].text, "per ADR 0002");
+});
+
+test("every citing line in a block is its own problem", () => {
+  const result = analyze("// Public surface of the package (ADR 0015).\n// Workers import only what is exported here.\n// per ADR 0002\nexport const a = 1;\n");
+  assert.deepEqual(kinds(result), ["cites a document", "cites a document"]);
+  assert.deepEqual(result.problems.map((p) => [p.line, p.text]), [[1, "Public surface of the package (ADR 0015)."], [3, "per ADR 0002"]]);
+});
+
+test("a problem judged on a whole block reports the block's line range", () => {
+  const result = analyze("// Now we validate the input\n// and then normalise it\nconst x = 1;\n");
+  assert.deepEqual(kinds(result), ["narrates the steps"]);
+  assert.equal(result.problems[0].line, 1);
+  assert.equal(result.problems[0].endLine, 2);
+  const report = guard.formatReport([result], config);
+  assert.match(report, /L1-L2 narrates the steps/);
+});
+
 test("issue, ticket, slice and spec-section references are flagged", () => {
   for (const text of ["// see ticket #94", "// (#94)", "// slice 1.2 of the plan", "// as required by spec section 3", "// per the ADR", "// PROJ-123 asked for this", "// see docs/adr/0009-keyed.md"]) {
     const result = analyze(`${text}\nconst x = 1;\n`);
@@ -81,10 +104,11 @@ test("comment markers inside strings are not comments", () => {
   assert.deepEqual(kinds(result), ["cites a document"]);
 });
 
-test("consecutive line comments are one comment reported at its first line", () => {
+test("consecutive line comments are one comment; a citation inside it is reported at the citing line", () => {
   const result = analyze(`const a = 1;\n\n// Letters, digits, '-' and '_' only. Other characters are excluded\n// because future routes depend on it (ADR 0002).\nconst RE = /x/;\n`);
   assert.equal(result.problems.length, 1);
-  assert.equal(result.problems[0].line, 3);
+  assert.equal(result.problems[0].line, 4);
+  assert.equal(result.problems[0].text, "because future routes depend on it (ADR 0002).");
 });
 
 test("python docstrings and hash comments are extracted", () => {
@@ -115,7 +139,7 @@ test("non-source files are skipped", () => {
 
 test("the PR #100 fixtures: every ADR citation is flagged and the why comments survive", () => {
   const shortCode = guard.analyzeFile(path.join(FIXTURES, "short-code.ts"), config);
-  assert.equal(shortCode.problems.filter((p) => p.kind === "cites a document").length, 5);
+  assert.equal(shortCode.problems.filter((p) => p.kind === "cites a document").length, 6, "lines 10 and 11 of one block each cite an ADR");
   assert.equal(shortCode.overBudget, true);
 
   const generator = guard.analyzeFile(path.join(FIXTURES, "generator.ts"), config);
@@ -258,6 +282,23 @@ test("Stop checks only files this session edited, reports only added lines, and 
 
   const second = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: true });
   assert.equal(second.stdout, "");
+});
+
+test("Stop catches a citation appended under a pre-existing comment block", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  run("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(dir, "index.ts"), "// Public surface of the package.\n// Workers import only what is exported here.\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "index.ts"), "// Public surface of the package.\n// Workers import only what is exported here.\n// per ADR 0002\nexport const a = 1;\n");
+
+  const session_id = `block-${process.pid}-${Date.now()}`;
+  runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "index.ts") }, cwd: dir, session_id });
+  const blocked = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
+  assert.notEqual(blocked.stdout, "", "the appended citation is an added line and must be reported");
+  const output = JSON.parse(blocked.stdout);
+  assert.match(output.reason, /index\.ts:\n  L3 cites a document: "per ADR 0002"/);
 });
 
 test("the CLI exits non-zero on problems and zero when clean", () => {

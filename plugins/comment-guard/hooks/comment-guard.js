@@ -275,7 +275,8 @@ function mergeAdjacentLineComments(comments) {
 function finalize(extractedComments, lines, commentLineNumbers, cleanLine) {
   const comments = mergeAdjacentLineComments(extractedComments);
   for (const comment of comments) {
-    comment.text = comment.rawLines.map((raw) => cleanLine(raw).trim()).filter(Boolean).join(" ").trim();
+    comment.lineTexts = comment.rawLines.map((raw) => cleanLine(raw).trim());
+    comment.text = comment.lineTexts.filter(Boolean).join(" ").trim();
     comment.nextCodeLine = "";
     for (let i = comment.endLine; i < lines.length; i++) {
       const candidate = lines[i].trim();
@@ -348,10 +349,12 @@ function analyzeSource(source, filePath, config) {
   for (const comment of extracted.comments) {
     const text = comment.text;
     if (text === "" || PRAGMA_PATTERN.test(text)) continue;
-    const where = { line: comment.startLine, text };
+    const where = { line: comment.startLine, endLine: comment.endLine, text };
 
     if (isReference(text, config)) {
-      problems.push({ ...where, kind: "cites a document", fix: "delete it. The decision record already holds the reasoning; the link belongs in the commit trailer (Implements: ADR-NNNN / Refs: #NN), the test name, or the ADR's Implemented-by list." });
+      for (const where of citingLines(comment, config)) {
+        problems.push({ ...where, kind: "cites a document", fix: "delete it. The decision record already holds the reasoning; the link belongs in the commit trailer (Implements: ADR-NNNN / Refs: #NN), the test name, or the ADR's Implemented-by list." });
+      }
     } else if (BANNER_PATTERN.test(text)) {
       problems.push({ ...where, kind: "section banner", fix: "delete it; if the section needs a name, extract it into a function with that name." });
     } else if (comment.kind === "line" && !comment.trailing && DEAD_CODE_PATTERN.test(text) && /[=(){}:;]/.test(text)) {
@@ -371,6 +374,14 @@ function analyzeSource(source, filePath, config) {
   return { filePath, language, problems, ratio, overBudget, commentLines: extracted.commentLines, nonBlankLines: extracted.nonBlankLines, comments: extracted.comments };
 }
 
+function citingLines(comment, config) {
+  const found = [];
+  (comment.lineTexts || []).forEach((lineText, index) => {
+    if (isReference(lineText, config)) found.push({ line: comment.startLine + index, endLine: comment.startLine + index, text: lineText });
+  });
+  return found.length > 0 ? found : [{ line: comment.startLine, endLine: comment.endLine, text: comment.text }];
+}
+
 function analyzeFile(filePath, config) {
   if (!fs.existsSync(filePath) || isExcluded(filePath, config) || !languageFor(filePath)) return null;
   return analyzeSource(fs.readFileSync(filePath, "utf8"), filePath, config);
@@ -381,11 +392,11 @@ function formatReport(results, config, { addedLinesByFile } = {}) {
   for (const result of results) {
     if (!result) continue;
     const added = addedLinesByFile ? addedLinesByFile.get(result.filePath) : null;
-    const problems = added ? result.problems.filter((p) => added.has(p.line)) : result.problems;
+    const problems = added ? result.problems.filter((p) => touchesAddedLine(p, added)) : result.problems;
     const lines = [];
     for (const problem of problems) {
       const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
-      lines.push(`  L${problem.line} ${problem.kind}: "${preview}" -> ${problem.fix}`);
+      lines.push(`  ${lineRange(problem)} ${problem.kind}: "${preview}" -> ${problem.fix}`);
     }
     if (result.overBudget) {
       const percent = Math.round(result.ratio * 100);
@@ -399,6 +410,15 @@ function formatReport(results, config, { addedLinesByFile } = {}) {
     ...sections,
     "Fix this now before continuing: delete the listed comments, and where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.",
   ].join("\n");
+}
+
+function lineRange(problem) {
+  return problem.endLine > problem.line ? `L${problem.line}-L${problem.endLine}` : `L${problem.line}`;
+}
+
+function touchesAddedLine(problem, added) {
+  for (let line = problem.line; line <= problem.endLine; line++) if (added.has(line)) return true;
+  return false;
 }
 
 function relative(filePath) {
