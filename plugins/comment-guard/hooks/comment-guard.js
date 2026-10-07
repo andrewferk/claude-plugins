@@ -286,12 +286,12 @@ function finalize(extractedComments, lines, commentLineNumbers, cleanLine) {
       }
     }
   }
-  const nonBlankLines = lines.filter((line) => line.trim() !== "").length;
-  const pureCommentLines = [...commentLineNumbers].filter((n) => {
+  const nonBlankLineNumbers = new Set(lines.map((line, index) => (line.trim() === "" ? 0 : index + 1)).filter(Boolean));
+  const pureCommentLineNumbers = new Set([...commentLineNumbers].filter((n) => {
     const text = lines[n - 1].trim();
     return text.startsWith("//") || text.startsWith("/*") || text.startsWith("*") || text.startsWith("#") || text.startsWith('"""') || text.startsWith("'''") || commentOnlyLine(n, comments);
-  }).length;
-  return { comments, nonBlankLines, commentLines: pureCommentLines, lineCount: lines.length };
+  }));
+  return { comments, nonBlankLineNumbers, commentLineNumbers: pureCommentLineNumbers, lineCount: lines.length };
 }
 
 function commentOnlyLine(lineNumber, comments) {
@@ -368,10 +368,16 @@ function analyzeSource(source, filePath, config) {
     }
   }
 
-  const ratio = extracted.nonBlankLines === 0 ? 0 : extracted.commentLines / extracted.nonBlankLines;
-  const overBudget = extracted.commentLines >= config.minCommentLines && ratio > config.maxCommentRatio;
+  const { commentLineNumbers, nonBlankLineNumbers, comments } = extracted;
+  return { filePath, language, problems, ...commentBudget(extracted, config), commentLineNumbers, nonBlankLineNumbers, comments };
+}
 
-  return { filePath, language, problems, ratio, overBudget, commentLines: extracted.commentLines, nonBlankLines: extracted.nonBlankLines, comments: extracted.comments };
+function commentBudget(counted, config, within = null) {
+  const size = (numbers) => (within ? [...numbers].filter((n) => within.has(n)).length : numbers.size);
+  const commentLines = size(counted.commentLineNumbers);
+  const nonBlankLines = size(counted.nonBlankLineNumbers);
+  const ratio = nonBlankLines === 0 ? 0 : commentLines / nonBlankLines;
+  return { commentLines, nonBlankLines, ratio, overBudget: commentLines >= config.minCommentLines && ratio > config.maxCommentRatio };
 }
 
 function citingLines(comment, config) {
@@ -398,9 +404,10 @@ function formatReport(results, config, { addedLinesByFile } = {}) {
       const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
       lines.push(`  ${lineRange(problem)} ${problem.kind}: "${preview}" -> ${problem.fix}`);
     }
-    if (result.overBudget) {
-      const percent = Math.round(result.ratio * 100);
-      lines.push(`  budget: ${result.commentLines} of ${result.nonBlankLines} non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`);
+    const budget = commentBudget(result, config, added);
+    if (budget.overBudget) {
+      const percent = Math.round(budget.ratio * 100);
+      lines.push(`  budget: ${budget.commentLines} of ${budget.nonBlankLines} ${added ? "added " : ""}non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`);
     }
     if (lines.length > 0) sections.push(`${relative(result.filePath)}:\n${lines.join("\n")}`);
   }
@@ -487,7 +494,8 @@ function handlePostToolUse(input, config, mode) {
     return;
   }
   if (isSource) rememberTouched(input, resolved);
-  const report = formatReport([analyzeFile(resolved, config)], config);
+  const addedLinesByFile = new Map([[resolved, editedLines(input, toolName, resolved)]]);
+  const report = formatReport([analyzeFile(resolved, config)], config, { addedLinesByFile });
   if (!report && !policy) return;
   const output = {};
   if (report && mode !== "warn") {
@@ -497,6 +505,42 @@ function handlePostToolUse(input, config, mode) {
   const context = [policy, mode === "warn" ? report : null].filter(Boolean).join("\n\n");
   if (context) output.hookSpecificOutput = { hookEventName: "PostToolUse", additionalContext: context };
   emit(output);
+}
+
+function editedLines(input, toolName, filePath) {
+  const response = input.tool_response || {};
+  if (Array.isArray(response.structuredPatch)) return addedLinesFromPatch(response.structuredPatch);
+  if (toolName === "Write" || !fs.existsSync(filePath)) return null;
+  const toolInput = input.tool_input || {};
+  const edits = toolName === "MultiEdit" ? toolInput.edits || [] : [toolInput];
+  const inserted = edits.map((edit) => edit.new_string).filter((text) => typeof text === "string");
+  if (inserted.length === 0) return null;
+  return linesContaining(fs.readFileSync(filePath, "utf8"), inserted.filter(Boolean));
+}
+
+function addedLinesFromPatch(hunks) {
+  const added = new Set();
+  for (const hunk of hunks) {
+    let line = hunk.newStart;
+    for (const text of hunk.lines || []) {
+      if (text.startsWith("-") || text.startsWith("\\")) continue;
+      if (text.startsWith("+")) added.add(line);
+      line++;
+    }
+  }
+  return added;
+}
+
+function linesContaining(content, snippets) {
+  const found = new Set();
+  for (const snippet of snippets) {
+    for (let at = content.indexOf(snippet); at !== -1; at = content.indexOf(snippet, at + snippet.length)) {
+      const first = content.slice(0, at).split("\n").length;
+      const span = snippet.replace(/\n$/, "").split("\n").length;
+      for (let offset = 0; offset < span; offset++) found.add(first + offset);
+    }
+  }
+  return found;
 }
 
 function firstSourceFileContext(config) {
@@ -634,7 +678,8 @@ function runCli(args, config) {
   const files = args.filter((arg) => !arg.startsWith("--"));
   const results = files.map((file) => analyzeFile(path.resolve(file), config));
   if (mode === "json") {
-    process.stdout.write(`${JSON.stringify(results.filter(Boolean), null, 2)}\n`);
+    const printable = results.filter(Boolean).map(({ commentLineNumbers, nonBlankLineNumbers, ...rest }) => rest);
+    process.stdout.write(`${JSON.stringify(printable, null, 2)}\n`);
   } else {
     const report = formatReport(results, config);
     process.stdout.write(report ? `${report}\n` : "comment-guard: clean\n");
