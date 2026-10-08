@@ -627,3 +627,20 @@ test("the CLI with --github-event takes the base from the event and fetches it i
   assert.equal(dispatch.status, 2);
   assert.match(dispatch.stderr, /workflow_dispatch/);
 });
+
+test("the CLI with --json reports each file's problems and budget, scoped to added lines when --base is given", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// per ADR 0002\nexport const b = 2;\n");
+
+  const whole = JSON.parse(spawnSync("node", [SCRIPT, "--json", "a.ts"], { cwd: dir, encoding: "utf8" }).stdout);
+  assert.equal(whole.length, 1);
+  assert.deepEqual(whole[0].problems.map((p) => p.line), [1, 3]);
+  assert.equal(typeof whole[0].overBudget, "boolean");
+  assert.equal(whole[0].commentLineNumbers, undefined, "line-number sets stay out of the JSON");
+
+  const added = JSON.parse(spawnSync("node", [SCRIPT, "--json", "--base", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout);
+  assert.deepEqual(added[0].problems.map((p) => p.line), [3]);
+});

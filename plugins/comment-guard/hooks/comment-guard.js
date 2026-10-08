@@ -867,6 +867,10 @@ function cliTargets(options, config, cwd) {
   return { results, addedLinesByFile: base === null ? undefined : addedLinesByFile };
 }
 
+function jsonResults(results, config, addedLinesByFile) {
+  return judge(results, config, addedLinesByFile).map(({ filePath, problems, budget }) => ({ filePath, problems, ...budget }));
+}
+
 function runCli(args, config) {
   const options = parseCliArgs(args);
   const { results, addedLinesByFile, error } = cliTargets(options, config, process.cwd());
