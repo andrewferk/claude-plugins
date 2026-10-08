@@ -774,40 +774,58 @@ function handleStop(input, config, mode) {
 }
 
 function parseCliArgs(args) {
-  const options = { format: "text", base: undefined, files: [] };
+  const options = { format: "text", base: undefined, scope: "changed", paths: [], files: [] };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--json") options.format = "json";
     else if (arg === "--format") options.format = args[++i];
     else if (arg === "--base") options.base = args[++i];
+    else if (arg === "--scope") options.scope = args[++i];
+    else if (arg === "--paths") options.paths = splitGlobs(args[++i]);
     else if (!arg.startsWith("--")) options.files.push(arg);
   }
   return options;
 }
 
+function splitGlobs(value) {
+  return String(value || "").split(/[\n,]/).map((glob) => glob.trim()).filter(Boolean);
+}
+
+function matchesAnyGlob(relativePath, globs) {
+  const normalized = relativePath.split(path.sep).join("/");
+  return globs.some((glob) => globToRegExp(glob).test(normalized));
+}
+
 function cliTargets(options, config, cwd) {
-  if (options.base === undefined) {
+  if (options.scope !== "all" && options.base === undefined) {
     return { results: options.files.map((file) => analyzeFile(path.resolve(cwd, file), config)) };
   }
-  const base = git(["rev-parse", "--verify", "--quiet", `${options.base}^{commit}`], cwd);
-  if (!base) return { error: `comment-guard: --base ${options.base} is not a commit in this repository` };
-  const { root, files } = changedFiles(cwd, base);
+  const top = git(["rev-parse", "--show-toplevel"], cwd);
+  if (!top) return { error: "comment-guard: not inside a git repository" };
+  const root = realPath(top);
+  let base = null;
+  let files;
+  if (options.scope === "all") {
+    files = (git(["ls-files"], root) || "").split("\n").filter(Boolean).map((name) => path.join(root, name));
+  } else {
+    base = git(["rev-parse", "--verify", "--quiet", `${options.base}^{commit}`], cwd);
+    if (!base) return { error: `comment-guard: --base ${options.base} is not a commit in this repository` };
+    files = [...changedFiles(cwd, base).files];
+  }
   const wanted = options.files.length > 0 ? new Set(options.files.map((file) => realPath(path.resolve(cwd, file)))) : null;
   const results = [];
   const addedLinesByFile = new Map();
   for (const file of files) {
     if (wanted && !wanted.has(file)) continue;
+    if (options.paths.length > 0 && !matchesAnyGlob(path.relative(root, file), options.paths)) continue;
     const result = analyzeFile(file, config);
     if (!result) continue;
     results.push(result);
+    if (base === null) continue;
     const added = addedLines(root, base, path.relative(root, file));
     if (added !== null) addedLinesByFile.set(file, added);
   }
-  return { results, addedLinesByFile };
-}
-
-function jsonResults(results, config, addedLinesByFile) {
-  return judge(results, config, addedLinesByFile).map(({ filePath, problems, budget }) => ({ filePath, problems, ...budget }));
+  return { results, addedLinesByFile: base === null ? undefined : addedLinesByFile };
 }
 
 function runCli(args, config) {

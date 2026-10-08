@@ -562,3 +562,30 @@ test("github annotations escape newlines and percent signs in the message", () =
   assert.match(out.stdout, /^::error file=a\.ts,line=1,endLine=2,title=comment-guard::narrates the steps: "Now we validate the input 100%25 of the time"/m);
   assert.doesNotMatch(out.stdout, /%(?!25|0A|0D)/, "every percent sign is encoded");
 });
+
+test("the CLI with --scope all checks every tracked source file, and --paths narrows it", () => {
+  const { dir, run } = gitRepo();
+  fs.mkdirSync(path.join(dir, "docs"));
+  fs.writeFileSync(path.join(dir, "a.ts"), "// per ADR 0002\nexport const a = 1;\n");
+  fs.writeFileSync(path.join(dir, "c.py"), "# per ADR 0003\nc = 3\n");
+  fs.writeFileSync(path.join(dir, "docs", "b.ts"), "// per ADR 0004\nexport const b = 2;\n");
+  fs.writeFileSync(path.join(dir, "README.md"), "per ADR 0005\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "untracked.ts"), "// per ADR 0006\nexport const u = 6;\n");
+
+  const all = spawnSync("node", [SCRIPT, "--scope", "all"], { cwd: dir, encoding: "utf8" });
+  assert.equal(all.status, 1);
+  assert.match(all.stdout, /a\.ts:/);
+  assert.match(all.stdout, /c\.py:/);
+  assert.doesNotMatch(all.stdout, /docs\/b\.ts/, "the exclude list still applies");
+  assert.doesNotMatch(all.stdout, /untracked/, "only tracked files are audited");
+
+  const narrowed = spawnSync("node", [SCRIPT, "--scope", "all", "--paths", "**/*.py\nnothing/**"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowed.status, 1);
+  assert.doesNotMatch(narrowed.stdout, /a\.ts/);
+  assert.match(narrowed.stdout, /c\.py:/);
+
+  const narrowedChange = spawnSync("node", [SCRIPT, "--base", "HEAD~0", "--paths", "docs/**"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowedChange.status, 0, "--paths narrows a changed-lines run the same way");
+});
