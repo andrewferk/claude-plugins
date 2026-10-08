@@ -21,7 +21,7 @@ Three layers, from advisory to deterministic, all shipped as hooks:
 |---|---|---|
 | Policy | PostToolUse on `Read`, `Edit`, `Write` | The first time a session reads or edits a source file (TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, Swift, C#, Ruby), the [policy](./policy/code-comments.md) is added to context, once. A session that never touches source never sees it. |
 | Skill context | `UserPromptExpansion`, and PostToolUse on the `Skill` tool, both narrowed to the `mattpocock-skills` plugin | When `implement`, `tdd`, `code-review`, `diagnosing-bugs`, `prototype`, `improve-codebase-architecture`, `implement-spec`, or `codebase-design` starts, whether you typed it or Claude invoked it, the policy is injected again with a skill-specific addendum. For `code-review` that adds a comment-hygiene check to the Standards brief and a citation check to the Spec brief: open the cited document and confirm it says what the comment claims. |
-| Enforcement | PostToolUse on `Edit`, `Write`, and a `Stop` hook | After each edit, only the lines that edit added are judged (read from the tool's patch; a file the agent creates is judged whole). A violation blocks with a line-by-line report and the fix. Before the agent stops, the files this session edited are checked against the branch's changes and again only added lines count. A comment that was already in the file before the change never blocks, so legacy files and your own uncommitted work stay out of the report. The agent cannot finish with violations in place. |
+| Enforcement | PreToolUse and PostToolUse on `Edit`, `Write`, `MultiEdit`, and a `Stop` hook | Before an edit lands, the hook computes the file it would produce and refuses the call if the lines it adds break the policy, with a line-by-line report and the fix; the file on disk is never touched. After an edit that got through, the same check runs on the lines the tool's patch says were added (a file the agent creates is judged whole), as a safety net. Before the agent stops, the files this session edited are checked against the branch's changes and again only added lines count. A comment that was already in the file before the change never blocks, so legacy files and your own uncommitted work stay out of the report. The agent cannot finish with violations in place. |
 
 ## What the scanner flags
 
@@ -48,7 +48,7 @@ Skipped: dotfiles, `*.config.*`, `*.d.ts`, `docs/`, `node_modules/`, `dist/`, ge
 
 ## Tune or switch off
 
-- `COMMENT_GUARD=warn` turns blocks into advisory context. `COMMENT_GUARD=off` disables every hook.
+- `COMMENT_GUARD=warn` turns blocks into advisory context and lets every edit land. `COMMENT_GUARD=off` disables every hook.
 - `~/.claude/comment-guard.json` or `<project>/.claude/comment-guard.json` overrides `maxCommentRatio`, `minCommentLines`, `exclude` (globs, added to the defaults), `referenceAllowlistPrefixes`, `skillMatch` (which skills get the addendum), and `policyFile` (your own policy text).
 - To target another skills plugin, change the `if` rule and the `UserPromptExpansion` matcher in `hooks/hooks.json` as well as `skillMatch`. `if` holds one permission rule with no list syntax, so a prefix such as `Skill(mattpocock-skills *)` is how a whole plugin is named.
 - Run it by hand: `node hooks/comment-guard.js src/**/*.ts` exits 1 on problems, `--json` gives structured output. This also works as a pre-commit or CI check under any agent.
@@ -63,6 +63,7 @@ The fixtures in `test/fixtures/pr100` are files copied from [andrewferk/url-shor
 
 ## Limits
 
+- The refusal before an edit reconstructs the file from the tool's input. For `Write` over an existing file, a line counts as added when the old file did not contain it verbatim, so a moved line is judged again.
 - The hooks never report a comment that predates the change, so a touched file can keep old violations. Run the CLI on it to see them all.
 - The scanner is pattern-based. It cannot judge whether a comment that cites no document is worthwhile; the budget and the policy text carry that part.
 - Template literals, nested block comments, and raw strings in Rust or Python are handled approximately. A false positive is cheap to see in the report and can be excluded by path.
