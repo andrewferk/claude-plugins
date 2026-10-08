@@ -463,9 +463,9 @@ function realPath(filePath) {
   }
 }
 
-function rememberTouched(input, filePath) {
+function rememberChange(input) {
   const file = sessionFile(input);
-  if (file) fs.appendFileSync(file, `${realPath(filePath)}\n`);
+  if (file) fs.writeFileSync(file, "");
 }
 
 function policyDeliveredThisSession(input) {
@@ -477,15 +477,15 @@ function policyDeliveredThisSession(input) {
   return false;
 }
 
-function touchedThisSession(input) {
+function changedThisSession(input) {
   const file = sessionFile(input);
-  if (!file || !fs.existsSync(file)) return new Set();
-  return new Set(fs.readFileSync(file, "utf8").split("\n").filter(Boolean));
+  return Boolean(file && fs.existsSync(file));
 }
 
 function handlePostToolUse(input, config, mode) {
   const toolName = input.tool_name || "";
   if (toolName === "Skill") return handleSkill(input, config);
+  if (toolName === "Bash") return rememberChange(input);
   if (!/^(Read|Edit|Write|MultiEdit)$/.test(toolName)) return;
   const filePath = input.tool_input && input.tool_input.file_path;
   if (!filePath) return;
@@ -496,7 +496,7 @@ function handlePostToolUse(input, config, mode) {
     if (policy) emit({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: policy } });
     return;
   }
-  if (isSource) rememberTouched(input, resolved);
+  rememberChange(input);
   const addedLinesByFile = new Map([[resolved, editedLines(input, toolName, resolved)]]);
   const report = formatReport([analyzeFile(resolved, config)], config, { addedLinesByFile });
   if (!report && !policy) return;
@@ -658,20 +658,17 @@ function git(args, cwd) {
 
 function changedFiles(cwd) {
   const top = git(["rev-parse", "--show-toplevel"], cwd);
-  if (!top) return { root: null, files: new Map() };
+  if (!top) return { root: null, base: null, files: new Set() };
   const root = realPath(top);
-  const files = new Map();
   const base = mergeBase(root);
   const committed = base ? git(["diff", "--name-only", `${base}..HEAD`], root) : "";
   const working = git(["diff", "--name-only", "HEAD"], root) || "";
   const untracked = git(["ls-files", "--others", "--exclude-standard"], root) || "";
+  const files = new Set();
   for (const name of [...(committed || "").split("\n"), ...working.split("\n"), ...untracked.split("\n")]) {
-    if (name.trim()) files.set(path.join(root, name.trim()), null);
+    if (name.trim()) files.add(path.join(root, name.trim()));
   }
-  for (const file of files.keys()) {
-    files.set(file, addedLines(root, base, path.relative(root, file)));
-  }
-  return { root, files };
+  return { root, base, files };
 }
 
 function mergeBase(root) {
@@ -706,18 +703,15 @@ function addedLines(root, base, relativePath) {
 }
 
 function handleStop(input, config, mode) {
-  if (input.stop_hook_active) return;
-  const touched = touchedThisSession(input);
-  if (touched.size === 0) return;
-  const cwd = input.cwd || process.cwd();
-  const { files } = changedFiles(cwd);
+  if (input.stop_hook_active || !changedThisSession(input)) return;
+  const { root, base, files } = changedFiles(input.cwd || process.cwd());
   const results = [];
   const addedLinesByFile = new Map();
-  for (const [file, added] of files) {
-    if (!touched.has(file)) continue;
+  for (const file of files) {
     const result = analyzeFile(file, config);
     if (!result) continue;
     results.push(result);
+    const added = addedLines(root, base, path.relative(root, file));
     if (added !== null) addedLinesByFile.set(file, added);
   }
   const report = formatReport(results, config, { addedLinesByFile });
