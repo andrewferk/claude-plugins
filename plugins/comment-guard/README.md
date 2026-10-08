@@ -51,7 +51,35 @@ Skipped: dotfiles, `*.config.*`, `*.d.ts`, `docs/`, `node_modules/`, `dist/`, ge
 - `COMMENT_GUARD=warn` turns blocks into advisory context and lets every edit land. `COMMENT_GUARD=off` disables every hook.
 - `~/.claude/comment-guard.json` or `<project>/.claude/comment-guard.json` overrides `maxCommentRatio`, `minCommentLines`, `exclude` (globs, added to the defaults), `referenceAllowlistPrefixes`, `skillMatch` (which skills get the addendum), and `policyFile` (your own policy text).
 - To target another skills plugin, change the `if` rule and the `UserPromptExpansion` matcher in `hooks/hooks.json` as well as `skillMatch`. `if` holds one permission rule with no list syntax, so a prefix such as `Skill(mattpocock-skills *)` is how a whole plugin is named.
-- Run it by hand: `node hooks/comment-guard.js src/**/*.ts` exits 1 on problems, `--json` gives structured output. This also works as a pre-commit or CI check under any agent.
+- Run it by hand: `node hooks/comment-guard.js src/**/*.ts` exits 1 on problems, `--json` gives structured output. `--base <commit>` judges only the lines added since that commit across every changed file, `--scope all` audits every tracked source file, and `--paths` takes newline- or comma-separated globs that narrow either run. This also works as a pre-commit check under any agent.
+
+## Use in CI
+
+The same scanner ships as a composite GitHub Action, so a pull request fails on the comments the hook would have refused locally. It judges only the lines the pull request adds, fetches the base commit itself when the checkout is shallow, annotates each finding on the diff, and writes a table to the job summary. No token or permission is needed.
+
+```yaml
+name: comment-guard
+
+on:
+  pull_request:
+  merge_group:
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: andrewferk/claude-plugins/plugins/comment-guard@comment-guard-v0.3.0
+```
+
+| Input | Default | Effect |
+|---|---|---|
+| `scope` | `changed` | `changed` judges the lines added since the base; `all` audits every tracked source file. |
+| `base` | from the event | A commit sha to diff against. Read from the `pull_request`, `merge_group`, or `push` payload when empty; any other event needs `base` or `scope: all`. |
+| `paths` | every source file | Newline-separated globs that narrow the file set. They never add back a file the exclude list removes. |
+| `fail` | `true` | `false` annotates and summarises but lets the job pass, for a repository adopting the policy gradually. |
+
+Policy settings come from the repository's `.claude/comment-guard.json`, the same file the hook reads, so the action and the hook cannot disagree. The runner needs Node 18 or later on the path, which GitHub's hosted runners provide. Pin the exact release tag; there is no floating major tag before 1.0.
 
 ## Tests
 

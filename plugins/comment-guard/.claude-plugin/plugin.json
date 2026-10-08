@@ -1,7 +1,7 @@
 {
   "name": "comment-guard",
   "version": "0.2.0",
-  "description": "Keeps LLM-written code free of restating, narrating, and document-citing comments. Hooks deliver the policy on the first source file a session touches, tighten it when a mattpocock skill starts, block edits that break it, and re-check the branch before the agent stops.",
+  "description": "Keeps LLM-written code free of restating, narrating, and document-citing comments. Hooks deliver the policy on the first source file a session touches, tighten it when a mattpocock skill starts, block edits that break it, and re-check the branch before the agent stops. The same scanner runs as a GitHub Action on pull requests.",
   "author": {
     "name": "Andrew Ferk",
     "url": "https://github.com/andrewferk"
@@ -13,7 +13,8 @@
     "hooks",
     "tdd",
     "adr",
-    "mattpocock-skills"
+    "mattpocock-skills",
+    "github-action"
   ],
   "repository": "https://github.com/andrewferk/claude-plugins",
   "homepage": "https://github.com/andrewferk/claude-plugins/tree/main/plugins/comment-guard"
