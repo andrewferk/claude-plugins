@@ -10,15 +10,15 @@ inputs:
     required: false
     default: changed
   base:
-    description: A commit sha to diff against. Defaults to the base of the pull request, merge group, or push that triggered the run.
+    description: A commit sha to diff against. Defaults to the base of the pull request, merge group, or push that triggered the run; a first push, a force-push, or any other event has no base and needs this or `scope: all`.
     required: false
     default: ""
   paths:
-    description: Newline-separated globs that narrow which files are checked. Empty means every source file the policy covers.
+    description: Newline- or comma-separated globs, relative to the repository root, that narrow which files are checked. Empty means every source file the policy covers.
     required: false
     default: ""
   fail:
-    description: "`false` still annotates the diff and writes the job summary but lets the job pass."
+    description: "`false` still annotates the diff and writes the job summary but lets the job pass. A usage error or a crash fails the job either way."
     required: false
     default: "true"
 runs:
