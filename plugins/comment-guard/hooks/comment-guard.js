@@ -780,6 +780,7 @@ function parseCliArgs(args) {
     if (arg === "--json") options.format = "json";
     else if (arg === "--format") options.format = args[++i];
     else if (arg === "--base") options.base = args[++i];
+    else if (arg === "--github-event") options.githubEvent = true;
     else if (arg === "--scope") options.scope = args[++i];
     else if (arg === "--paths") options.paths = splitGlobs(args[++i]);
     else if (!arg.startsWith("--")) options.files.push(arg);
@@ -796,7 +797,44 @@ function matchesAnyGlob(relativePath, globs) {
   return globs.some((glob) => globToRegExp(glob).test(normalized));
 }
 
+const ZERO_SHA = /^0{40}$/;
+const WAYS_OUT = "pass `base: <sha>` or `scope: all`";
+
+function baseFromGithubEvent(eventName, eventPath) {
+  let event = {};
+  try {
+    event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  } catch {
+    return { error: `comment-guard: cannot read the GitHub event at ${eventPath}; ${WAYS_OUT}` };
+  }
+  const base = {
+    pull_request: event.pull_request && event.pull_request.base && event.pull_request.base.sha,
+    pull_request_target: event.pull_request && event.pull_request.base && event.pull_request.base.sha,
+    merge_group: event.merge_group && event.merge_group.base_sha,
+    push: event.before,
+  }[eventName];
+  if (!base) return { error: `comment-guard: no base commit can be read from a ${eventName} event; ${WAYS_OUT}` };
+  if (ZERO_SHA.test(base)) return { error: `comment-guard: this ${eventName} has no previous commit to compare with; ${WAYS_OUT}` };
+  return { base };
+}
+
+function resolveBase(requested, root) {
+  const verify = () => git(["rev-parse", "--verify", "--quiet", `${requested}^{commit}`], root);
+  let base = verify();
+  if (!base && /^[0-9a-f]{40}$/.test(requested)) {
+    git(["fetch", "--no-tags", "--depth=1", "origin", requested], root);
+    base = verify();
+  }
+  if (!base) return { error: `comment-guard: --base ${requested} is not a commit in this repository and could not be fetched from origin; check out with fetch-depth: 0, or ${WAYS_OUT}` };
+  return { base };
+}
+
 function cliTargets(options, config, cwd) {
+  if (options.githubEvent && options.base === undefined && options.scope !== "all") {
+    const fromEvent = baseFromGithubEvent(process.env.GITHUB_EVENT_NAME, process.env.GITHUB_EVENT_PATH);
+    if (fromEvent.error) return fromEvent;
+    options.base = fromEvent.base;
+  }
   if (options.scope !== "all" && options.base === undefined) {
     return { results: options.files.map((file) => analyzeFile(path.resolve(cwd, file), config)) };
   }
@@ -808,8 +846,9 @@ function cliTargets(options, config, cwd) {
   if (options.scope === "all") {
     files = (git(["ls-files"], root) || "").split("\n").filter(Boolean).map((name) => path.join(root, name));
   } else {
-    base = git(["rev-parse", "--verify", "--quiet", `${options.base}^{commit}`], cwd);
-    if (!base) return { error: `comment-guard: --base ${options.base} is not a commit in this repository` };
+    const resolved = resolveBase(options.base, root);
+    if (resolved.error) return resolved;
+    base = resolved.base;
     files = [...changedFiles(cwd, base).files];
   }
   const wanted = options.files.length > 0 ? new Set(options.files.map((file) => realPath(path.resolve(cwd, file)))) : null;

@@ -589,3 +589,41 @@ test("the CLI with --scope all checks every tracked source file, and --paths nar
   const narrowedChange = spawnSync("node", [SCRIPT, "--base", "HEAD~0", "--paths", "docs/**"], { cwd: dir, encoding: "utf8" });
   assert.equal(narrowedChange.status, 0, "--paths narrows a changed-lines run the same way");
 });
+
+test("the CLI with --github-event takes the base from the event and fetches it into a shallow clone", () => {
+  const origin = gitRepo();
+  fs.writeFileSync(path.join(origin.dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  origin.run("add", ".");
+  origin.run("commit", "-q", "-m", "base");
+  const base = origin.run("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(origin.dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// Now wire it up\nexport const b = 2;\n");
+  origin.run("commit", "-q", "-am", "change");
+  origin.run("config", "uploadpack.allowReachableSHA1InWant", "true");
+
+  const checkout = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-clone-")), "repo");
+  execFileSync("git", ["clone", "-q", "--depth=1", `file://${origin.dir}`, checkout]);
+  assert.notEqual(spawnSync("git", ["cat-file", "-e", `${base}^{commit}`], { cwd: checkout }).status, 0, "the shallow clone must not already hold the base");
+
+  const event = path.join(checkout, "..", "event.json");
+  const runEvent = (name, payload) => {
+    fs.writeFileSync(event, JSON.stringify(payload));
+    return spawnSync("node", [SCRIPT, "--github-event"], { cwd: checkout, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: name, GITHUB_EVENT_PATH: event } });
+  };
+
+  const pr = runEvent("pull_request", { pull_request: { base: { sha: base } } });
+  assert.equal(pr.status, 1, pr.stderr);
+  assert.match(pr.stdout, /a\.ts:\n  L3 narrates the steps/);
+  assert.doesNotMatch(pr.stdout, /legacy note/);
+
+  const queue = runEvent("merge_group", { merge_group: { base_sha: base } });
+  assert.equal(queue.status, 1, queue.stderr);
+
+  const firstPush = runEvent("push", { before: "0000000000000000000000000000000000000000" });
+  assert.equal(firstPush.status, 2);
+  assert.match(firstPush.stderr, /base/);
+  assert.match(firstPush.stderr, /scope: all/);
+
+  const dispatch = runEvent("workflow_dispatch", {});
+  assert.equal(dispatch.status, 2);
+  assert.match(dispatch.stderr, /workflow_dispatch/);
+});
