@@ -530,3 +530,35 @@ test("the CLI with --base judges only the lines added since that commit", () => 
   assert.equal(nothing.status, 0);
   assert.equal(nothing.stdout, "comment-guard: clean\n");
 });
+
+test("the CLI with --format github annotates each finding and writes the step summary", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const summary = path.join(dir, "summary.md");
+  const plugin = path.join(__dirname, "..");
+  const env = { ...process.env, GITHUB_STEP_SUMMARY: summary };
+
+  const dirty = spawnSync("node", [SCRIPT, "--format", "github", "test/fixtures/pr100/short-code.ts"], { cwd: plugin, encoding: "utf8", env });
+  assert.equal(dirty.status, 1);
+  assert.match(dirty.stdout, /^::error file=test\/fixtures\/pr100\/short-code\.ts,line=7,endLine=7,title=comment-guard::cites a document: "A generated Short code is always exactly 7 base62 characters \(ADR 0002\)\." -> delete it\./m);
+  assert.match(dirty.stdout, /^::error file=test\/fixtures\/pr100\/short-code\.ts,title=comment-guard::budget: /m);
+  const written = fs.readFileSync(summary, "utf8");
+  assert.match(written, /\| test\/fixtures\/pr100\/short-code\.ts \| L7 \| cites a document \|/);
+
+  fs.writeFileSync(summary, "");
+  const clean = path.join(dir, "clean.ts");
+  fs.writeFileSync(clean, "export const x = 1;\n");
+  const ok = spawnSync("node", [SCRIPT, "--format", "github", clean], { cwd: plugin, encoding: "utf8", env });
+  assert.equal(ok.status, 0);
+  assert.doesNotMatch(ok.stdout, /::error/);
+  assert.match(fs.readFileSync(summary, "utf8"), /clean/);
+});
+
+test("github annotations escape newlines and percent signs in the message", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "a.ts");
+  fs.writeFileSync(file, "// Now we validate the input\n// 100% of the time\nconst x = 1;\n");
+  const out = spawnSync("node", [SCRIPT, "--format", "github", "a.ts"], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: "" } });
+  assert.equal(out.status, 1);
+  assert.match(out.stdout, /^::error file=a\.ts,line=1,endLine=2,title=comment-guard::narrates the steps: "Now we validate the input 100%25 of the time"/m);
+  assert.doesNotMatch(out.stdout, /%(?!25|0A|0D)/, "every percent sign is encoded");
+});

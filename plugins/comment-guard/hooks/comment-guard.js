@@ -396,29 +396,79 @@ function analyzeFile(filePath, config) {
 const FIX_NOW = "Fix this now before continuing: delete the listed comments, and where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
 const REDO_EDIT = "The edit was not applied. Redo it without the listed comments; where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
 
-function formatReport(results, config, { addedLinesByFile, footer = FIX_NOW } = {}) {
-  const sections = [];
+function judge(results, config, addedLinesByFile) {
+  const files = [];
   for (const result of results) {
     if (!result) continue;
     const added = addedLinesByFile ? addedLinesByFile.get(result.filePath) : null;
     const problems = added ? result.problems.filter((p) => touchesAddedLine(p, added)) : result.problems;
-    const lines = [];
-    for (const problem of problems) {
-      const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
-      lines.push(`  ${lineRange(problem)} ${problem.kind}: "${preview}" -> ${problem.fix}`);
-    }
-    const budget = commentBudget(result, config, added);
-    if (budget.overBudget) {
-      const percent = Math.round(budget.ratio * 100);
-      lines.push(`  budget: ${budget.commentLines} of ${budget.nonBlankLines} ${added ? "added " : ""}non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`);
-    }
-    if (lines.length > 0) sections.push(`${relative(result.filePath)}:\n${lines.join("\n")}`);
+    files.push({ filePath: result.filePath, problems, budget: commentBudget(result, config, added), onAddedLines: Boolean(added) });
+  }
+  return files;
+}
+
+function describeProblem(problem) {
+  const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
+  return `${problem.kind}: "${preview}" -> ${problem.fix}`;
+}
+
+function describeBudget(file, config) {
+  const { budget } = file;
+  const percent = Math.round(budget.ratio * 100);
+  return `budget: ${budget.commentLines} of ${budget.nonBlankLines} ${file.onAddedLines ? "added " : ""}non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`;
+}
+
+function formatReport(results, config, { addedLinesByFile, footer = FIX_NOW } = {}) {
+  const sections = [];
+  for (const file of judge(results, config, addedLinesByFile)) {
+    const lines = file.problems.map((problem) => `  ${lineRange(problem)} ${describeProblem(problem)}`);
+    if (file.budget.overBudget) lines.push(`  ${describeBudget(file, config)}`);
+    if (lines.length > 0) sections.push(`${relative(file.filePath)}:\n${lines.join("\n")}`);
   }
   if (sections.length === 0) return null;
   return [
     "comment-guard: the comment policy is not met.",
     ...sections,
     footer,
+  ].join("\n");
+}
+
+function annotationProperty(value) {
+  return String(value).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/:/g, "%3A").replace(/,/g, "%2C");
+}
+
+function annotationMessage(value) {
+  return String(value).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+function formatAnnotations(files, config) {
+  const lines = [];
+  for (const file of files) {
+    const where = `file=${annotationProperty(relative(file.filePath))}`;
+    for (const problem of file.problems) {
+      lines.push(`::error ${where},line=${problem.line},endLine=${problem.endLine},title=comment-guard::${annotationMessage(describeProblem(problem))}`);
+    }
+    if (file.budget.overBudget) lines.push(`::error ${where},title=comment-guard::${annotationMessage(describeBudget(file, config))}`);
+  }
+  return lines;
+}
+
+function formatStepSummary(files, config, checked) {
+  const rows = [];
+  for (const file of files) {
+    const name = relative(file.filePath);
+    for (const problem of file.problems) rows.push(`| ${name} | ${lineRange(problem)} | ${problem.kind} | ${problem.fix} |`);
+    if (file.budget.overBudget) rows.push(`| ${name} | | budget | ${describeBudget(file, config)} |`);
+  }
+  if (rows.length === 0) return `comment-guard: clean, ${checked} file${checked === 1 ? "" : "s"} checked.\n`;
+  const touched = new Set(files.filter((file) => file.problems.length > 0 || file.budget.overBudget).map((file) => file.filePath)).size;
+  return [
+    `### comment-guard: ${rows.length} finding${rows.length === 1 ? "" : "s"} in ${touched} file${touched === 1 ? "" : "s"}`,
+    "",
+    "| File | Line | Finding | Fix |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+    "",
   ].join("\n");
 }
 
@@ -728,6 +778,7 @@ function parseCliArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--json") options.format = "json";
+    else if (arg === "--format") options.format = args[++i];
     else if (arg === "--base") options.base = args[++i];
     else if (!arg.startsWith("--")) options.files.push(arg);
   }
@@ -756,10 +807,7 @@ function cliTargets(options, config, cwd) {
 }
 
 function jsonResults(results, config, addedLinesByFile) {
-  return results.filter(Boolean).map(({ commentLineNumbers, nonBlankLineNumbers, comments, problems, ...rest }) => {
-    const added = addedLinesByFile ? addedLinesByFile.get(rest.filePath) : null;
-    return { ...rest, problems: added ? problems.filter((p) => touchesAddedLine(p, added)) : problems, ...commentBudget({ commentLineNumbers, nonBlankLineNumbers }, config, added) };
-  });
+  return judge(results, config, addedLinesByFile).map(({ filePath, problems, budget }) => ({ filePath, problems, ...budget }));
 }
 
 function runCli(args, config) {
@@ -773,6 +821,11 @@ function runCli(args, config) {
   const report = formatReport(results, config, { addedLinesByFile });
   if (options.format === "json") {
     process.stdout.write(`${JSON.stringify(jsonResults(results, config, addedLinesByFile), null, 2)}\n`);
+  } else if (options.format === "github") {
+    const files = judge(results, config, addedLinesByFile);
+    const annotations = formatAnnotations(files, config);
+    process.stdout.write(annotations.length > 0 ? `${annotations.join("\n")}\n` : "comment-guard: clean\n");
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, formatStepSummary(files, config, files.length));
   } else {
     process.stdout.write(report ? `${report}\n` : "comment-guard: clean\n");
   }
