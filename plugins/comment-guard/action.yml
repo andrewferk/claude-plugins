@@ -1,0 +1,39 @@
+name: comment-guard
+description: Fails a pull request whose added lines carry comments that restate the code, narrate steps, or cite a document.
+author: Andrew Ferk
+branding:
+  icon: message-square
+  color: gray-dark
+inputs:
+  scope:
+    description: "`changed` judges only the lines added since the base commit; `all` audits every tracked source file."
+    required: false
+    default: changed
+  base:
+    description: A commit sha to diff against. Defaults to the base of the pull request, merge group, or push that triggered the run.
+    required: false
+    default: ""
+  paths:
+    description: Newline-separated globs that narrow which files are checked. Empty means every source file the policy covers.
+    required: false
+    default: ""
+  fail:
+    description: "`false` still annotates the diff and writes the job summary but lets the job pass."
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        BASE: ${{ inputs.base }}
+        PATHS: ${{ inputs.paths }}
+        FAIL: ${{ inputs.fail }}
+      run: |
+        args=(--format github --scope "$SCOPE" --paths "$PATHS")
+        if [ -n "$BASE" ]; then args+=(--base "$BASE"); else args+=(--github-event); fi
+        status=0
+        node "$GITHUB_ACTION_PATH/hooks/comment-guard.js" "${args[@]}" || status=$?
+        if [ "$status" -eq 1 ] && [ "$FAIL" = "false" ]; then exit 0; fi
+        exit "$status"
