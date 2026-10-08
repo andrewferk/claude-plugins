@@ -21,7 +21,7 @@ Three layers, from advisory to deterministic, all shipped as hooks:
 |---|---|---|
 | Policy | PostToolUse on `Read`, `Edit`, `Write` | The first time a session reads or edits a source file (TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, Swift, C#, Ruby), the [policy](./policy/code-comments.md) is added to context, once. A session that never touches source never sees it. |
 | Skill context | `UserPromptExpansion`, and PostToolUse on the `Skill` tool, both narrowed to the `mattpocock-skills` plugin | When `implement`, `tdd`, `code-review`, `diagnosing-bugs`, `prototype`, `improve-codebase-architecture`, `implement-spec`, or `codebase-design` starts, whether you typed it or Claude invoked it, the policy is injected again with a skill-specific addendum. For `code-review` that adds a comment-hygiene check to the Standards brief and a citation check to the Spec brief: open the cited document and confirm it says what the comment claims. |
-| Enforcement | PostToolUse on `Edit`, `Write`, and a `Stop` hook | After each edit the whole file is scanned; a violation blocks with a line-by-line report and the fix. Before the agent stops, the files this session edited are scanned against the branch's changes and only added lines are reported, so your own uncommitted work is never blocked. The agent cannot finish with violations in place. |
+| Enforcement | PostToolUse on `Edit`, `Write`, and a `Stop` hook | After each edit, only the lines that edit added are judged (read from the tool's patch; a file the agent creates is judged whole). A violation blocks with a line-by-line report and the fix. Before the agent stops, the files this session edited are checked against the branch's changes and again only added lines count. A comment that was already in the file before the change never blocks, so legacy files and your own uncommitted work stay out of the report. The agent cannot finish with violations in place. |
 
 ## What the scanner flags
 
@@ -33,7 +33,7 @@ Three layers, from advisory to deterministic, all shipped as hooks:
 | describes the change | `// Added to support retries` | Delete; that is the commit message. |
 | section banner | `// ---- Helpers ----` | Delete; extract. |
 | commented-out code | `// const old = compute(x);` | Delete. |
-| budget | more than 10% of non-blank lines are comments (and at least 3) | Delete restating and paraphrasing comments. |
+| budget | more than 10% of the change's non-blank lines are comments (and at least 3); the CLI measures the whole file | Delete restating and paraphrasing comments. |
 
 Never flagged: `TODO(#123)`, lint pragmas, shebangs, standards names such as `SHA-256` or `ISO-8601`, a units note the type cannot express (`/** Epoch ms. */ expiresAt?: number`), and any "why" comment that states a fact without naming a document.
 
@@ -63,6 +63,7 @@ The fixtures in `test/fixtures/pr100` are files copied from [andrewferk/url-shor
 
 ## Limits
 
+- The hooks never report a comment that predates the change, so a touched file can keep old violations. Run the CLI on it to see them all.
 - The scanner is pattern-based. It cannot judge whether a comment that cites no document is worthwhile; the budget and the policy text carry that part.
 - Template literals, nested block comments, and raw strings in Rust or Python are handled approximately. A false positive is cheap to see in the report and can be excluded by path.
 - The `Stop` hook fires once per stop; if the agent cannot fix a violation it stops on the second attempt with the report still in context.

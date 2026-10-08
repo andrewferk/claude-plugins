@@ -178,6 +178,82 @@ test("PostToolUse on Edit stays silent for a clean file", () => {
   assert.equal(result.stdout, "");
 });
 
+test("an edit is judged only on the lines it added", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  const legacy = "// Public surface of the package (ADR 0015).\nexport const a = 1;\n";
+
+  fs.writeFileSync(file, `${legacy}export const b = 2;\n`);
+  const cleanPatch = [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 3, lines: [" // Public surface of the package (ADR 0015).", " export const a = 1;", "+export const b = 2;"] }];
+  const clean = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "a = 1;\n", new_string: "a = 1;\nexport const b = 2;\n" }, tool_response: { filePath: file, structuredPatch: cleanPatch }, cwd: dir });
+  assert.equal(clean.stdout, "", "a citation the edit did not touch does not block");
+
+  fs.writeFileSync(file, `${legacy}// per ADR 0002\nexport const b = 2;\n`);
+  const citingPatch = [{ oldStart: 2, oldLines: 1, newStart: 2, newLines: 3, lines: [" export const a = 1;", "+// per ADR 0002", "+export const b = 2;"] }];
+  const blocked = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "a = 1;\n", new_string: "a = 1;\n// per ADR 0002\nexport const b = 2;\n" }, tool_response: { filePath: file, structuredPatch: citingPatch }, cwd: dir });
+  const output = JSON.parse(blocked.stdout);
+  assert.equal(output.decision, "block");
+  assert.match(output.reason, /L3 cites a document: "per ADR 0002"/);
+  assert.doesNotMatch(output.reason, /ADR 0015/, "the pre-existing citation is not the edit's problem");
+});
+
+test("an edit that carries no patch is scoped by the strings it inserted", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  fs.writeFileSync(file, "// Public surface of the package (ADR 0015).\nexport const a = 1;\n// per ADR 0002\nexport const b = 2;\n");
+  const blocked = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "export const a = 1;\n", new_string: "export const a = 1;\n// per ADR 0002\nexport const b = 2;\n" }, cwd: dir });
+  const output = JSON.parse(blocked.stdout);
+  assert.match(output.reason, /L3 cites a document: "per ADR 0002"/);
+  assert.doesNotMatch(output.reason, /ADR 0015/);
+
+  const deletion = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "export const c = 3;\n", new_string: "" }, cwd: dir });
+  assert.equal(deletion.stdout, "", "an edit that only removes text adds no lines to judge");
+});
+
+test("a created file is judged whole", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  const content = "// Public surface of the package (ADR 0015).\nexport const a = 1;\n";
+  fs.writeFileSync(file, content);
+  const result = runHook({ hook_event_name: "PostToolUse", tool_name: "Write", tool_input: { file_path: file, content }, tool_response: { type: "create", filePath: file, content }, cwd: dir });
+  assert.match(JSON.parse(result.stdout).reason, /L1 cites a document/);
+});
+
+test("the comment budget counts only the lines an edit added", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  const dense = "// kept for the v1 clients\n// the upstream rejects empty bodies\n// retries would double-charge\nexport const a = 1;\n";
+  assert.equal(guard.analyzeSource(dense, file, config).overBudget, true, "the whole file is over budget");
+
+  fs.writeFileSync(file, `${dense}export const b = 2;\n`);
+  const codePatch = [{ oldStart: 4, oldLines: 1, newStart: 4, newLines: 2, lines: [" export const a = 1;", "+export const b = 2;"] }];
+  const code = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "a = 1;\n", new_string: "a = 1;\nexport const b = 2;\n" }, tool_response: { filePath: file, structuredPatch: codePatch }, cwd: dir });
+  assert.equal(code.stdout, "", "adding a code line to a comment-heavy file is not over budget");
+
+  const commentPatch = [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 3, lines: ["+// kept for the v1 clients", "+// the upstream rejects empty bodies", "+// retries would double-charge"] }];
+  const comments = runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "", new_string: dense }, tool_response: { filePath: file, structuredPatch: commentPatch }, cwd: dir });
+  assert.match(JSON.parse(comments.stdout).reason, /budget: 3 of 3 added non-blank lines are comments \(100%\)/);
+
+  const created = runHook({ hook_event_name: "PostToolUse", tool_name: "Write", tool_input: { file_path: file }, tool_response: { type: "create", filePath: file }, cwd: dir });
+  assert.match(JSON.parse(created.stdout).reason, /budget: 3 of 5 non-blank lines are comments \(60%\)/);
+});
+
+test("Stop scopes the comment budget to the lines added on the branch", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  run("init", "-q", "-b", "main");
+  const dense = "// kept for the v1 clients\n// the upstream rejects empty bodies\n// retries would double-charge\nexport const a = 1;\n";
+  fs.writeFileSync(path.join(dir, "a.ts"), dense);
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "a.ts"), `${dense}export const b = 2;\n`);
+
+  const session_id = `budget-${process.pid}-${Date.now()}`;
+  runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "a.ts") }, cwd: dir, session_id });
+  const stop = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
+  assert.equal(stop.stdout, "", "legacy comments outside the branch's added lines do not trip the budget");
+});
+
 test("the policy is delivered once per session, on the first source file read or edited", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
   fs.writeFileSync(path.join(dir, "notes.md"), "# notes\n");
