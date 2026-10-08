@@ -644,3 +644,28 @@ test("the CLI with --json reports each file's problems and budget, scoped to add
   const added = JSON.parse(spawnSync("node", [SCRIPT, "--json", "--base", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout);
   assert.deepEqual(added[0].problems.map((p) => p.line), [3]);
 });
+
+test("a pull_request run diffs against the merge commit's base, not the base the event froze", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  const frozenBase = run("rev-parse", "HEAD");
+  run("checkout", "-q", "-b", "feature");
+  fs.writeFileSync(path.join(dir, "feature.ts"), "// per ADR 0002\nexport const f = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "feature");
+  const head = run("rev-parse", "HEAD");
+  run("checkout", "-q", "main");
+  fs.writeFileSync(path.join(dir, "other.ts"), "// Now wire it up\nexport const o = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "another pull request merged meanwhile");
+  run("merge", "-q", "--no-ff", "-m", "merge ref", "feature");
+
+  const event = path.join(dir, "..", `event-${process.pid}.json`);
+  fs.writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: frozenBase }, head: { sha: head } } }));
+  const out = spawnSync("node", [SCRIPT, "--github-event"], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event } });
+  assert.equal(out.status, 1, out.stderr);
+  assert.match(out.stdout, /feature\.ts:/);
+  assert.doesNotMatch(out.stdout, /other\.ts/, "work merged to main after the event is not this pull request's");
+});

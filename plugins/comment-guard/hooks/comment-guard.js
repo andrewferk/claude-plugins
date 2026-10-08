@@ -800,22 +800,30 @@ function matchesAnyGlob(relativePath, globs) {
 const ZERO_SHA = /^0{40}$/;
 const WAYS_OUT = "pass `base: <sha>` or `scope: all`";
 
-function baseFromGithubEvent(eventName, eventPath) {
+function baseFromGithubEvent(eventName, eventPath, cwd) {
   let event = {};
   try {
     event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
   } catch {
     return { error: `comment-guard: cannot read the GitHub event at ${eventPath}; ${WAYS_OUT}` };
   }
+  const pullRequest = event.pull_request || {};
   const base = {
-    pull_request: event.pull_request && event.pull_request.base && event.pull_request.base.sha,
-    pull_request_target: event.pull_request && event.pull_request.base && event.pull_request.base.sha,
+    pull_request: mergeRefBase(pullRequest, cwd) || (pullRequest.base && pullRequest.base.sha),
+    pull_request_target: mergeRefBase(pullRequest, cwd) || (pullRequest.base && pullRequest.base.sha),
     merge_group: event.merge_group && event.merge_group.base_sha,
     push: event.before,
   }[eventName];
   if (!base) return { error: `comment-guard: no base commit can be read from a ${eventName} event; ${WAYS_OUT}` };
   if (ZERO_SHA.test(base)) return { error: `comment-guard: this ${eventName} has no previous commit to compare with; ${WAYS_OUT}` };
   return { base };
+}
+
+function mergeRefBase(pullRequest, cwd) {
+  const headSha = pullRequest.head && pullRequest.head.sha;
+  if (!headSha) return null;
+  const parents = (git(["rev-list", "--parents", "-n1", "HEAD"], cwd) || "").split(" ").slice(1);
+  return parents.length === 2 && parents[1] === headSha ? parents[0] : null;
 }
 
 function resolveBase(requested, root) {
@@ -831,7 +839,7 @@ function resolveBase(requested, root) {
 
 function cliTargets(options, config, cwd) {
   if (options.githubEvent && options.base === undefined && options.scope !== "all") {
-    const fromEvent = baseFromGithubEvent(process.env.GITHUB_EVENT_NAME, process.env.GITHUB_EVENT_PATH);
+    const fromEvent = baseFromGithubEvent(process.env.GITHUB_EVENT_NAME, process.env.GITHUB_EVENT_PATH, cwd);
     if (fromEvent.error) return fromEvent;
     options.base = fromEvent.base;
   }
