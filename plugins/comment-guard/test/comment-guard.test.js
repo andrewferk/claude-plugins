@@ -695,3 +695,12 @@ test("a scanner crash exits 3 so the action cannot mistake it for findings", () 
   assert.equal(out.status, 3);
   assert.match(out.stderr, /comment-guard/);
 });
+
+test("action.yml quotes every description, so a colon in the prose cannot become a YAML mapping", () => {
+  const manifest = fs.readFileSync(path.join(__dirname, "..", "action.yml"), "utf8");
+  for (const line of manifest.split("\n")) {
+    const match = line.match(/^\s*description:\s*(.*)$/);
+    if (!match) continue;
+    assert.match(match[1], /^"[^"]*"$/, line);
+  }
+});

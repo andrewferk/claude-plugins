@@ -1,5 +1,5 @@
 name: comment-guard
-description: Fails a pull request whose added lines carry comments that restate the code, narrate steps, or cite a document.
+description: "Fails a pull request whose added lines carry comments that restate the code, narrate steps, or cite a document."
 author: Andrew Ferk
 branding:
   icon: message-square
@@ -10,11 +10,11 @@ inputs:
     required: false
     default: changed
   base:
-    description: A commit sha to diff against. Defaults to the base of the pull request, merge group, or push that triggered the run; a first push, a force-push, or any other event has no base and needs this or `scope: all`.
+    description: "A commit sha to diff against. Defaults to the base of the pull request, merge group, or push that triggered the run; a first push, a force-push, or any other event has no base and needs this or `scope: all`."
     required: false
     default: ""
   paths:
-    description: Newline- or comma-separated globs, relative to the repository root, that narrow which files are checked. Empty means every source file the policy covers.
+    description: "Newline- or comma-separated globs, relative to the repository root, that narrow which files are checked. Empty means every source file the policy covers."
     required: false
     default: ""
   fail:
