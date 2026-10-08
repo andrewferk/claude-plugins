@@ -656,11 +656,11 @@ function git(args, cwd) {
   }
 }
 
-function changedFiles(cwd) {
+function changedFiles(cwd, explicitBase) {
   const top = git(["rev-parse", "--show-toplevel"], cwd);
   if (!top) return { root: null, base: null, files: new Set() };
   const root = realPath(top);
-  const base = mergeBase(root);
+  const base = explicitBase === undefined ? mergeBase(root) : explicitBase;
   const committed = base ? git(["diff", "--name-only", `${base}..HEAD`], root) : "";
   const working = git(["diff", "--name-only", "HEAD"], root) || "";
   const untracked = git(["ls-files", "--others", "--exclude-standard"], root) || "";
@@ -723,18 +723,60 @@ function handleStop(input, config, mode) {
   emit({ decision: "block", reason: `${report}\nThese are the changes on this branch. Clean them up, commit the cleanup, then stop.` });
 }
 
+function parseCliArgs(args) {
+  const options = { format: "text", base: undefined, files: [] };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--json") options.format = "json";
+    else if (arg === "--base") options.base = args[++i];
+    else if (!arg.startsWith("--")) options.files.push(arg);
+  }
+  return options;
+}
+
+function cliTargets(options, config, cwd) {
+  if (options.base === undefined) {
+    return { results: options.files.map((file) => analyzeFile(path.resolve(cwd, file), config)) };
+  }
+  const base = git(["rev-parse", "--verify", "--quiet", `${options.base}^{commit}`], cwd);
+  if (!base) return { error: `comment-guard: --base ${options.base} is not a commit in this repository` };
+  const { root, files } = changedFiles(cwd, base);
+  const wanted = options.files.length > 0 ? new Set(options.files.map((file) => realPath(path.resolve(cwd, file)))) : null;
+  const results = [];
+  const addedLinesByFile = new Map();
+  for (const file of files) {
+    if (wanted && !wanted.has(file)) continue;
+    const result = analyzeFile(file, config);
+    if (!result) continue;
+    results.push(result);
+    const added = addedLines(root, base, path.relative(root, file));
+    if (added !== null) addedLinesByFile.set(file, added);
+  }
+  return { results, addedLinesByFile };
+}
+
+function jsonResults(results, config, addedLinesByFile) {
+  return results.filter(Boolean).map(({ commentLineNumbers, nonBlankLineNumbers, comments, problems, ...rest }) => {
+    const added = addedLinesByFile ? addedLinesByFile.get(rest.filePath) : null;
+    return { ...rest, problems: added ? problems.filter((p) => touchesAddedLine(p, added)) : problems, ...commentBudget({ commentLineNumbers, nonBlankLineNumbers }, config, added) };
+  });
+}
+
 function runCli(args, config) {
-  const mode = args.includes("--json") ? "json" : "text";
-  const files = args.filter((arg) => !arg.startsWith("--"));
-  const results = files.map((file) => analyzeFile(path.resolve(file), config));
-  if (mode === "json") {
-    const printable = results.filter(Boolean).map(({ commentLineNumbers, nonBlankLineNumbers, ...rest }) => rest);
-    process.stdout.write(`${JSON.stringify(printable, null, 2)}\n`);
+  const options = parseCliArgs(args);
+  const { results, addedLinesByFile, error } = cliTargets(options, config, process.cwd());
+  if (error) {
+    process.stderr.write(`${error}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const report = formatReport(results, config, { addedLinesByFile });
+  if (options.format === "json") {
+    process.stdout.write(`${JSON.stringify(jsonResults(results, config, addedLinesByFile), null, 2)}\n`);
   } else {
-    const report = formatReport(results, config);
     process.stdout.write(report ? `${report}\n` : "comment-guard: clean\n");
   }
-  process.exitCode = results.some((r) => r && (r.problems.length > 0 || r.overBudget)) ? 1 : 0;
+  process.exitCode = report ? 1 : 0;
 }
 
 function main() {

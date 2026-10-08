@@ -497,3 +497,36 @@ test("the CLI exits non-zero on problems and zero when clean", () => {
   fs.writeFileSync(clean, "export const x = 1;\n");
   assert.equal(spawnSync("node", [SCRIPT, clean], { encoding: "utf8" }).status, 0);
 });
+
+function gitRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+  run("init", "-q", "-b", "main");
+  return { dir, run };
+}
+
+test("the CLI with --base judges only the lines added since that commit", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  const base = run("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// Now wire it up\nexport const b = 2;\n");
+  fs.writeFileSync(path.join(dir, "c.ts"), "// per ADR 0002\nexport const c = 3;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "change");
+
+  const changed = spawnSync("node", [SCRIPT, "--base", base], { cwd: dir, encoding: "utf8" });
+  assert.equal(changed.status, 1);
+  assert.match(changed.stdout, /a\.ts:\n  L3 narrates the steps/);
+  assert.match(changed.stdout, /c\.ts:\n  L1 cites a document/);
+  assert.doesNotMatch(changed.stdout, /legacy note/);
+
+  const narrowed = spawnSync("node", [SCRIPT, "--base", base, "c.ts"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowed.status, 1);
+  assert.doesNotMatch(narrowed.stdout, /a\.ts/, "file arguments narrow the changed set");
+
+  const nothing = spawnSync("node", [SCRIPT, "--base", "HEAD"], { cwd: dir, encoding: "utf8" });
+  assert.equal(nothing.status, 0);
+  assert.equal(nothing.stdout, "comment-guard: clean\n");
+});
