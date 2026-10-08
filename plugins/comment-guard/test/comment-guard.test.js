@@ -420,7 +420,7 @@ test("hooks.json narrows to the plugin once; the script's skillMatch picks the s
   }
 });
 
-test("Stop checks only files this session edited, reports only added lines, and respects stop_hook_active", () => {
+test("Stop checks every file changed on the branch once the session has edited, reports only added lines, and respects stop_hook_active", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
   const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
   run("init", "-q", "-b", "main");
@@ -434,20 +434,42 @@ test("Stop checks only files this session edited, reports only added lines, and 
 
   const session_id = `test-${process.pid}-${Date.now()}`;
   const untouched = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
-  assert.equal(untouched.stdout, "", "a session that edited nothing is never blocked");
+  assert.equal(untouched.stdout, "", "a session that changed nothing is never blocked");
+  runHook({ hook_event_name: "PostToolUse", tool_name: "Read", tool_input: { file_path: path.join(dir, "a.ts") }, cwd: dir, session_id });
+  const readOnly = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
+  assert.equal(readOnly.stdout, "", "a session that only read files is never blocked");
 
-  for (const file of ["a.ts", "c.ts"]) {
-    runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, file) }, cwd: dir, session_id });
-  }
+  runHook({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "a.ts") }, cwd: dir, session_id });
   const blocked = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
   const output = JSON.parse(blocked.stdout);
   assert.equal(output.decision, "block");
   assert.match(output.reason, /a\.ts:\n  L3 describes the change/);
   assert.doesNotMatch(output.reason, /legacy note/);
-  assert.match(output.reason, /c\.ts:\n  L1 narrates/);
+  assert.match(output.reason, /c\.ts:\n  L1 narrates/, "a changed file the session never edited through a tool is still checked");
 
   const second = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: true });
   assert.equal(second.stdout, "");
+});
+
+test("a file written through Bash is checked at Stop", () => {
+  const hooksJson = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "hooks", "hooks.json"), "utf8")).hooks;
+  assert.ok(new RegExp(`^(${hooksJson.PostToolUse[0].matcher})$`).test("Bash"), "PostToolUse does not cover Bash");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  run("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+
+  const session_id = `bash-${process.pid}-${Date.now()}`;
+  const shell = runHook({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "cat > b.ts" }, tool_response: { stdout: "", stderr: "" }, cwd: dir, session_id });
+  assert.equal(shell.stdout, "", "a shell command gets neither a block nor the policy");
+  fs.writeFileSync(path.join(dir, "b.ts"), "// per ADR 0002\nexport const b = 2;\n");
+  const blocked = runHook({ hook_event_name: "Stop", cwd: dir, session_id, stop_hook_active: false });
+  const output = JSON.parse(blocked.stdout);
+  assert.equal(output.decision, "block");
+  assert.match(output.reason, /b\.ts:\n  L1 cites a document: "per ADR 0002"/);
 });
 
 test("Stop catches a citation appended under a pre-existing comment block", () => {
