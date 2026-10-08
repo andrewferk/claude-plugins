@@ -9,14 +9,15 @@
     {
       "name": "comment-guard",
       "source": "./plugins/comment-guard",
-      "description": "Keeps LLM-written code free of restating, narrating, and document-citing comments. Delivers the policy by hook, tightens it for mattpocock skills, blocks edits that break it, and re-checks the branch before the agent stops.",
+      "description": "Keeps LLM-written code free of restating, narrating, and document-citing comments. Delivers the policy by hook, tightens it for mattpocock skills, blocks edits that break it, re-checks the branch before the agent stops, and runs as a GitHub Action on pull requests.",
       "category": "engineering",
       "keywords": [
         "comments",
         "code-quality",
         "hooks",
         "tdd",
-        "adr"
+        "adr",
+        "github-action"
       ]
     },
     {

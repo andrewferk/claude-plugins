@@ -396,29 +396,84 @@ function analyzeFile(filePath, config) {
 const FIX_NOW = "Fix this now before continuing: delete the listed comments, and where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
 const REDO_EDIT = "The edit was not applied. Redo it without the listed comments; where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
 
-function formatReport(results, config, { addedLinesByFile, footer = FIX_NOW } = {}) {
-  const sections = [];
+function judge(results, config, addedLinesByFile) {
+  const files = [];
   for (const result of results) {
     if (!result) continue;
     const added = addedLinesByFile ? addedLinesByFile.get(result.filePath) : null;
     const problems = added ? result.problems.filter((p) => touchesAddedLine(p, added)) : result.problems;
-    const lines = [];
-    for (const problem of problems) {
-      const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
-      lines.push(`  ${lineRange(problem)} ${problem.kind}: "${preview}" -> ${problem.fix}`);
-    }
-    const budget = commentBudget(result, config, added);
-    if (budget.overBudget) {
-      const percent = Math.round(budget.ratio * 100);
-      lines.push(`  budget: ${budget.commentLines} of ${budget.nonBlankLines} ${added ? "added " : ""}non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`);
-    }
-    if (lines.length > 0) sections.push(`${relative(result.filePath)}:\n${lines.join("\n")}`);
+    files.push({ filePath: result.filePath, language: result.language, comments: result.comments, problems, budget: commentBudget(result, config, added), onAddedLines: Boolean(added) });
+  }
+  return files;
+}
+
+function describeProblem(problem) {
+  const preview = problem.text.length > 90 ? `${problem.text.slice(0, 87)}...` : problem.text;
+  return `${problem.kind}: "${preview}" -> ${problem.fix}`;
+}
+
+function describeBudget(file, config) {
+  const { budget } = file;
+  const percent = Math.round(budget.ratio * 100);
+  return `budget: ${budget.commentLines} of ${budget.nonBlankLines} ${file.onAddedLines ? "added " : ""}non-blank lines are comments (${percent}%); the limit is ${Math.round(config.maxCommentRatio * 100)}%. Delete comments that restate code or paraphrase a document; keep only a non-obvious why.`;
+}
+
+function formatReport(results, config, { addedLinesByFile, footer = FIX_NOW } = {}) {
+  return formatReportOfJudged(judge(results, config, addedLinesByFile), config, footer);
+}
+
+function formatReportOfJudged(files, config, footer = FIX_NOW) {
+  const sections = [];
+  for (const file of files) {
+    const lines = file.problems.map((problem) => `  ${lineRange(problem)} ${describeProblem(problem)}`);
+    if (file.budget.overBudget) lines.push(`  ${describeBudget(file, config)}`);
+    if (lines.length > 0) sections.push(`${relative(file.filePath)}:\n${lines.join("\n")}`);
   }
   if (sections.length === 0) return null;
   return [
     "comment-guard: the comment policy is not met.",
     ...sections,
     footer,
+  ].join("\n");
+}
+
+function annotationProperty(value) {
+  return String(value).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/:/g, "%3A").replace(/,/g, "%2C");
+}
+
+function annotationMessage(value) {
+  return String(value).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+function formatAnnotations(files, config) {
+  const lines = [];
+  for (const file of files) {
+    const where = `file=${annotationProperty(relative(file.filePath))}`;
+    for (const problem of file.problems) {
+      lines.push(`::error ${where},line=${problem.line},endLine=${problem.endLine},title=comment-guard::${annotationMessage(describeProblem(problem))}`);
+    }
+    if (file.budget.overBudget) lines.push(`::error ${where},title=comment-guard::${annotationMessage(describeBudget(file, config))}`);
+  }
+  return lines;
+}
+
+function formatStepSummary(files, config) {
+  const checked = files.length;
+  const rows = [];
+  for (const file of files) {
+    const name = relative(file.filePath);
+    for (const problem of file.problems) rows.push(`| ${name} | ${lineRange(problem)} | ${problem.kind} | ${problem.fix} |`);
+    if (file.budget.overBudget) rows.push(`| ${name} | | budget | ${describeBudget(file, config)} |`);
+  }
+  if (rows.length === 0) return `comment-guard: clean, ${checked} file${checked === 1 ? "" : "s"} checked.\n`;
+  const touched = new Set(files.filter((file) => file.problems.length > 0 || file.budget.overBudget).map((file) => file.filePath)).size;
+  return [
+    `### comment-guard: ${rows.length} finding${rows.length === 1 ? "" : "s"} in ${touched} file${touched === 1 ? "" : "s"}`,
+    "",
+    "| File | Line | Finding | Fix |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+    "",
   ].join("\n");
 }
 
@@ -656,11 +711,11 @@ function git(args, cwd) {
   }
 }
 
-function changedFiles(cwd) {
+function changedFiles(cwd, explicitBase) {
   const top = git(["rev-parse", "--show-toplevel"], cwd);
   if (!top) return { root: null, base: null, files: new Set() };
   const root = realPath(top);
-  const base = mergeBase(root);
+  const base = explicitBase === undefined ? mergeBase(root) : explicitBase;
   const committed = base ? git(["diff", "--name-only", `${base}..HEAD`], root) : "";
   const working = git(["diff", "--name-only", "HEAD"], root) || "";
   const untracked = git(["ls-files", "--others", "--exclude-standard"], root) || "";
@@ -723,18 +778,150 @@ function handleStop(input, config, mode) {
   emit({ decision: "block", reason: `${report}\nThese are the changes on this branch. Clean them up, commit the cleanup, then stop.` });
 }
 
-function runCli(args, config) {
-  const mode = args.includes("--json") ? "json" : "text";
-  const files = args.filter((arg) => !arg.startsWith("--"));
-  const results = files.map((file) => analyzeFile(path.resolve(file), config));
-  if (mode === "json") {
-    const printable = results.filter(Boolean).map(({ commentLineNumbers, nonBlankLineNumbers, ...rest }) => rest);
-    process.stdout.write(`${JSON.stringify(printable, null, 2)}\n`);
+const VALUE_FLAGS = new Set(["--format", "--base", "--scope", "--paths"]);
+const FORMATS = new Set(["text", "json", "github"]);
+const SCOPES = new Set(["changed", "all"]);
+
+function parseCliArgs(args) {
+  const options = { format: "text", base: undefined, githubEvent: false, scope: "changed", paths: [], files: [] };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (VALUE_FLAGS.has(arg)) {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("--")) return { error: `comment-guard: ${arg} needs a value` };
+      i++;
+      if (arg === "--format") options.format = value;
+      else if (arg === "--base") options.base = value;
+      else if (arg === "--scope") options.scope = value;
+      else options.paths = splitGlobs(value);
+    } else if (arg === "--json") options.format = "json";
+    else if (arg === "--github-event") options.githubEvent = true;
+    else if (arg.startsWith("--")) return { error: `comment-guard: unknown flag ${arg}` };
+    else options.files.push(arg);
+  }
+  if (!FORMATS.has(options.format)) return { error: `comment-guard: --format must be one of ${[...FORMATS].join(", ")}` };
+  if (!SCOPES.has(options.scope)) return { error: `comment-guard: --scope must be one of ${[...SCOPES].join(", ")}` };
+  if (options.scope === "all" && options.base !== undefined) return { error: "comment-guard: --base and --scope all are exclusive; a full audit has no base" };
+  return { options };
+}
+
+function splitGlobs(value) {
+  return String(value || "").split(/[\n,]/).map((glob) => glob.trim()).filter(Boolean);
+}
+
+function matchesAnyGlob(relativePath, globs) {
+  const normalized = relativePath.split(path.sep).join("/");
+  return globs.some((glob) => globToRegExp(glob).test(normalized));
+}
+
+const ZERO_SHA = /^0{40}$/;
+const BASE_ALTERNATIVES = "pass --base <sha> (the action's `base` input) or --scope all (`scope: all`)";
+
+function baseFromGithubEvent(eventName, eventPath, cwd) {
+  let event = {};
+  try {
+    event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  } catch {
+    return { error: `comment-guard: cannot read the GitHub event at ${eventPath}; ${BASE_ALTERNATIVES}` };
+  }
+  const pullRequest = event.pull_request || {};
+  const base = {
+    pull_request: mergeRefBase(pullRequest, cwd) || (pullRequest.base && pullRequest.base.sha),
+    pull_request_target: mergeRefBase(pullRequest, cwd) || (pullRequest.base && pullRequest.base.sha),
+    merge_group: event.merge_group && event.merge_group.base_sha,
+    push: event.before,
+  }[eventName];
+  if (!base) return { error: `comment-guard: no base commit can be read from a ${eventName} event; ${BASE_ALTERNATIVES}` };
+  if (ZERO_SHA.test(base)) return { error: `comment-guard: this ${eventName} has no previous commit to compare with; ${BASE_ALTERNATIVES}` };
+  return { base };
+}
+
+function mergeRefBase(pullRequest, cwd) {
+  const headSha = pullRequest.head && pullRequest.head.sha;
+  if (!headSha) return null;
+  const parents = (git(["rev-list", "--parents", "-n1", "HEAD"], cwd) || "").split(" ").slice(1);
+  return parents.length === 2 && parents[1] === headSha ? parents[0] : null;
+}
+
+function resolveBase(requested, root) {
+  const verify = () => git(["rev-parse", "--verify", "--quiet", `${requested}^{commit}`], root);
+  let base = verify();
+  if (!base && /^[0-9a-f]{40}$/.test(requested)) {
+    git(["fetch", "--no-tags", "--depth=1", "origin", requested], root);
+    base = verify();
+  }
+  if (!base) return { error: `comment-guard: --base ${requested} is not a commit in this repository and could not be fetched from origin (a force-push or a fresh branch has no reachable base); check out with fetch-depth: 0 if it exists, or ${BASE_ALTERNATIVES}` };
+  return { base };
+}
+
+function selectBase(options, cwd) {
+  if (options.base !== undefined || !options.githubEvent) return { base: options.base };
+  return baseFromGithubEvent(process.env.GITHUB_EVENT_NAME, process.env.GITHUB_EVENT_PATH, cwd);
+}
+
+function analyzeSelection(options, config, cwd) {
+  if (options.scope === "all") return analyzeRepository(options, config, cwd, null);
+  const selected = selectBase(options, cwd);
+  if (selected.error) return selected;
+  if (selected.base === undefined) return { files: judge(options.files.map((file) => analyzeFile(path.resolve(cwd, file), config)), config) };
+  return analyzeRepository(options, config, cwd, selected.base);
+}
+
+function analyzeRepository(options, config, cwd, requestedBase) {
+  const top = git(["rev-parse", "--show-toplevel"], cwd);
+  if (!top) return { error: "comment-guard: not inside a git repository" };
+  const root = realPath(top);
+  let base = null;
+  let files;
+  if (requestedBase === null) {
+    files = (git(["ls-files"], root) || "").split("\n").filter(Boolean).map((name) => path.join(root, name));
   } else {
-    const report = formatReport(results, config);
+    const resolved = resolveBase(requestedBase, root);
+    if (resolved.error) return resolved;
+    base = resolved.base;
+    files = [...changedFiles(cwd, base).files];
+  }
+  const wanted = options.files.length > 0 ? new Set(options.files.map((file) => realPath(path.resolve(cwd, file)))) : null;
+  const results = [];
+  const addedLinesByFile = new Map();
+  for (const file of files) {
+    if (wanted && !wanted.has(file)) continue;
+    if (options.paths.length > 0 && !matchesAnyGlob(path.relative(root, file), options.paths)) continue;
+    const result = analyzeFile(file, config);
+    if (!result) continue;
+    results.push(result);
+    if (base === null) continue;
+    const added = addedLines(root, base, path.relative(root, file));
+    if (added !== null) addedLinesByFile.set(file, added);
+  }
+  return { files: judge(results, config, base === null ? undefined : addedLinesByFile) };
+}
+
+function hasFindings(file) {
+  return file.problems.length > 0 || file.budget.overBudget;
+}
+
+function runCli(args, config) {
+  const parsed = parseCliArgs(args);
+  const { files, error } = parsed.error ? parsed : analyzeSelection(parsed.options, config, process.cwd());
+  if (error) {
+    process.stderr.write(`${error}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const { format } = parsed.options;
+  if (format === "json") {
+    const printable = files.map(({ filePath, language, problems, budget, comments }) => ({ filePath, language, problems, ...budget, comments }));
+    process.stdout.write(`${JSON.stringify(printable, null, 2)}\n`);
+  } else if (format === "github") {
+    const annotations = formatAnnotations(files, config);
+    process.stdout.write(annotations.length > 0 ? `${annotations.join("\n")}\n` : "comment-guard: clean\n");
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, formatStepSummary(files, config));
+  } else {
+    const report = formatReportOfJudged(files, config);
     process.stdout.write(report ? `${report}\n` : "comment-guard: clean\n");
   }
-  process.exitCode = results.some((r) => r && (r.problems.length > 0 || r.overBudget)) ? 1 : 0;
+  process.exitCode = files.some(hasFindings) ? 1 : 0;
 }
 
 function main() {
@@ -765,6 +952,13 @@ function main() {
   }
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`comment-guard: crashed: ${error && error.stack ? error.stack : error}\n`);
+    process.exitCode = 3;
+  }
+}
 
 module.exports = { analyzeSource, analyzeFile, formatReport, loadConfig, DEFAULT_CONFIG, extractComments, isReference, restatesName, globToRegExp, isExcluded };

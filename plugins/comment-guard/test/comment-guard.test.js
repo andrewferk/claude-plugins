@@ -497,3 +497,210 @@ test("the CLI exits non-zero on problems and zero when clean", () => {
   fs.writeFileSync(clean, "export const x = 1;\n");
   assert.equal(spawnSync("node", [SCRIPT, clean], { encoding: "utf8" }).status, 0);
 });
+
+function gitRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-repo-"));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+  run("init", "-q", "-b", "main");
+  return { dir, run };
+}
+
+test("the CLI with --base judges only the lines added since that commit", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  const base = run("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// Now wire it up\nexport const b = 2;\n");
+  fs.writeFileSync(path.join(dir, "c.ts"), "// per ADR 0002\nexport const c = 3;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "change");
+
+  const changed = spawnSync("node", [SCRIPT, "--base", base], { cwd: dir, encoding: "utf8" });
+  assert.equal(changed.status, 1);
+  assert.match(changed.stdout, /a\.ts:\n  L3 narrates the steps/);
+  assert.match(changed.stdout, /c\.ts:\n  L1 cites a document/);
+  assert.doesNotMatch(changed.stdout, /legacy note/);
+
+  const narrowed = spawnSync("node", [SCRIPT, "--base", base, "c.ts"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowed.status, 1);
+  assert.doesNotMatch(narrowed.stdout, /a\.ts/, "file arguments narrow the changed set");
+
+  const nothing = spawnSync("node", [SCRIPT, "--base", "HEAD"], { cwd: dir, encoding: "utf8" });
+  assert.equal(nothing.status, 0);
+  assert.equal(nothing.stdout, "comment-guard: clean\n");
+});
+
+test("the CLI with --format github annotates each finding and writes the step summary", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const summary = path.join(dir, "summary.md");
+  const plugin = path.join(__dirname, "..");
+  const env = { ...process.env, GITHUB_STEP_SUMMARY: summary };
+
+  const dirty = spawnSync("node", [SCRIPT, "--format", "github", "test/fixtures/pr100/short-code.ts"], { cwd: plugin, encoding: "utf8", env });
+  assert.equal(dirty.status, 1);
+  assert.match(dirty.stdout, /^::error file=test\/fixtures\/pr100\/short-code\.ts,line=7,endLine=7,title=comment-guard::cites a document: "A generated Short code is always exactly 7 base62 characters \(ADR 0002\)\." -> delete it\./m);
+  assert.match(dirty.stdout, /^::error file=test\/fixtures\/pr100\/short-code\.ts,title=comment-guard::budget: /m);
+  const written = fs.readFileSync(summary, "utf8");
+  assert.match(written, /\| test\/fixtures\/pr100\/short-code\.ts \| L7 \| cites a document \|/);
+
+  fs.writeFileSync(summary, "");
+  const clean = path.join(dir, "clean.ts");
+  fs.writeFileSync(clean, "export const x = 1;\n");
+  const ok = spawnSync("node", [SCRIPT, "--format", "github", clean], { cwd: plugin, encoding: "utf8", env });
+  assert.equal(ok.status, 0);
+  assert.doesNotMatch(ok.stdout, /::error/);
+  assert.match(fs.readFileSync(summary, "utf8"), /clean/);
+});
+
+test("github annotations escape newlines and percent signs in the message", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "a.ts");
+  fs.writeFileSync(file, "// Now we validate the input\n// 100% of the time\nconst x = 1;\n");
+  const out = spawnSync("node", [SCRIPT, "--format", "github", "a.ts"], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: "" } });
+  assert.equal(out.status, 1);
+  assert.match(out.stdout, /^::error file=a\.ts,line=1,endLine=2,title=comment-guard::narrates the steps: "Now we validate the input 100%25 of the time"/m);
+  assert.doesNotMatch(out.stdout, /%(?!25|0A|0D)/, "every percent sign is encoded");
+});
+
+test("the CLI with --scope all checks every tracked source file, and --paths narrows it", () => {
+  const { dir, run } = gitRepo();
+  fs.mkdirSync(path.join(dir, "docs"));
+  fs.writeFileSync(path.join(dir, "a.ts"), "// per ADR 0002\nexport const a = 1;\n");
+  fs.writeFileSync(path.join(dir, "c.py"), "# per ADR 0003\nc = 3\n");
+  fs.writeFileSync(path.join(dir, "docs", "b.ts"), "// per ADR 0004\nexport const b = 2;\n");
+  fs.writeFileSync(path.join(dir, "README.md"), "per ADR 0005\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "untracked.ts"), "// per ADR 0006\nexport const u = 6;\n");
+
+  const all = spawnSync("node", [SCRIPT, "--scope", "all"], { cwd: dir, encoding: "utf8" });
+  assert.equal(all.status, 1);
+  assert.match(all.stdout, /a\.ts:/);
+  assert.match(all.stdout, /c\.py:/);
+  assert.doesNotMatch(all.stdout, /docs\/b\.ts/, "the exclude list still applies");
+  assert.doesNotMatch(all.stdout, /untracked/, "only tracked files are audited");
+
+  const narrowed = spawnSync("node", [SCRIPT, "--scope", "all", "--paths", "**/*.py\nnothing/**"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowed.status, 1);
+  assert.doesNotMatch(narrowed.stdout, /a\.ts/);
+  assert.match(narrowed.stdout, /c\.py:/);
+
+  const narrowedChange = spawnSync("node", [SCRIPT, "--base", "HEAD~0", "--paths", "docs/**"], { cwd: dir, encoding: "utf8" });
+  assert.equal(narrowedChange.status, 0, "--paths narrows a changed-lines run the same way");
+});
+
+test("the CLI with --github-event takes the base from the event and fetches it into a shallow clone", () => {
+  const origin = gitRepo();
+  fs.writeFileSync(path.join(origin.dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  origin.run("add", ".");
+  origin.run("commit", "-q", "-m", "base");
+  const base = origin.run("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(origin.dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// Now wire it up\nexport const b = 2;\n");
+  origin.run("commit", "-q", "-am", "change");
+  origin.run("config", "uploadpack.allowReachableSHA1InWant", "true");
+
+  const checkout = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-clone-")), "repo");
+  execFileSync("git", ["clone", "-q", "--depth=1", `file://${origin.dir}`, checkout]);
+  assert.notEqual(spawnSync("git", ["cat-file", "-e", `${base}^{commit}`], { cwd: checkout }).status, 0, "the shallow clone must not already hold the base");
+
+  const event = path.join(checkout, "..", "event.json");
+  const runEvent = (name, payload) => {
+    fs.writeFileSync(event, JSON.stringify(payload));
+    return spawnSync("node", [SCRIPT, "--github-event"], { cwd: checkout, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: name, GITHUB_EVENT_PATH: event } });
+  };
+
+  const pr = runEvent("pull_request", { pull_request: { base: { sha: base } } });
+  assert.equal(pr.status, 1, pr.stderr);
+  assert.match(pr.stdout, /a\.ts:\n  L3 narrates the steps/);
+  assert.doesNotMatch(pr.stdout, /legacy note/);
+
+  const queue = runEvent("merge_group", { merge_group: { base_sha: base } });
+  assert.equal(queue.status, 1, queue.stderr);
+
+  const firstPush = runEvent("push", { before: "0000000000000000000000000000000000000000" });
+  assert.equal(firstPush.status, 2);
+  assert.match(firstPush.stderr, /base/);
+  assert.match(firstPush.stderr, /scope: all/);
+
+  const dispatch = runEvent("workflow_dispatch", {});
+  assert.equal(dispatch.status, 2);
+  assert.match(dispatch.stderr, /workflow_dispatch/);
+});
+
+test("the CLI with --json reports each file's problems and budget, scoped to added lines when --base is given", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  fs.writeFileSync(path.join(dir, "a.ts"), "// legacy note (ADR 0001)\nexport const a = 1;\n// per ADR 0002\nexport const b = 2;\n");
+
+  const whole = JSON.parse(spawnSync("node", [SCRIPT, "--json", "a.ts"], { cwd: dir, encoding: "utf8" }).stdout);
+  assert.equal(whole.length, 1);
+  assert.deepEqual(whole[0].problems.map((p) => p.line), [1, 3]);
+  assert.equal(typeof whole[0].overBudget, "boolean");
+  assert.equal(whole[0].commentLineNumbers, undefined, "line-number sets stay out of the JSON");
+  assert.equal(whole[0].language, "c");
+  assert.ok(Array.isArray(whole[0].comments), "the extracted comments stay in the JSON as in 0.2.0");
+
+  const added = JSON.parse(spawnSync("node", [SCRIPT, "--json", "--base", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout);
+  assert.deepEqual(added[0].problems.map((p) => p.line), [3]);
+});
+
+test("a pull_request run diffs against the merge commit's base, not the base the event froze", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  const frozenBase = run("rev-parse", "HEAD");
+  run("checkout", "-q", "-b", "feature");
+  fs.writeFileSync(path.join(dir, "feature.ts"), "// per ADR 0002\nexport const f = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "feature");
+  const head = run("rev-parse", "HEAD");
+  run("checkout", "-q", "main");
+  fs.writeFileSync(path.join(dir, "other.ts"), "// Now wire it up\nexport const o = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "another pull request merged meanwhile");
+  run("merge", "-q", "--no-ff", "-m", "merge ref", "feature");
+
+  const event = path.join(dir, "..", `event-${process.pid}.json`);
+  fs.writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: frozenBase }, head: { sha: head } } }));
+  const out = spawnSync("node", [SCRIPT, "--github-event"], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event } });
+  assert.equal(out.status, 1, out.stderr);
+  assert.match(out.stdout, /feature\.ts:/);
+  assert.doesNotMatch(out.stdout, /other\.ts/, "work merged to main after the event is not this pull request's");
+});
+
+test("the CLI refuses a flag without a value, and --base together with --scope all", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  for (const args of [["--base"], ["--scope"], ["--format"], ["--paths"], ["--base", "--scope", "all"]]) {
+    const out = spawnSync("node", [SCRIPT, ...args], { cwd: dir, encoding: "utf8" });
+    assert.equal(out.status, 2, args.join(" "));
+    assert.match(out.stderr, new RegExp(args[0]));
+  }
+  const both = spawnSync("node", [SCRIPT, "--base", "HEAD", "--scope", "all"], { cwd: dir, encoding: "utf8" });
+  assert.equal(both.status, 2);
+  assert.match(both.stderr, /--base/);
+  assert.match(both.stderr, /--scope all/);
+  const unknownFormat = spawnSync("node", [SCRIPT, "--format", "xml", "a.ts"], { cwd: dir, encoding: "utf8" });
+  assert.equal(unknownFormat.status, 2);
+});
+
+test("a scanner crash exits 3 so the action cannot mistake it for findings", () => {
+  const out = spawnSync("node", [SCRIPT, "--format", "github", path.join(FIXTURES, "short-code.ts")], { encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: path.join(os.tmpdir(), "comment-guard-missing-dir", "summary.md") } });
+  assert.equal(out.status, 3);
+  assert.match(out.stderr, /comment-guard/);
+});
+
+test("action.yml quotes every description, so a colon in the prose cannot become a YAML mapping", () => {
+  const manifest = fs.readFileSync(path.join(__dirname, "..", "action.yml"), "utf8");
+  for (const line of manifest.split("\n")) {
+    const match = line.match(/^\s*description:\s*(.*)$/);
+    if (!match) continue;
+    assert.match(match[1], /^"[^"]*"$/, line);
+  }
+});

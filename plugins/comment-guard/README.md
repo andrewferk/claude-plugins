@@ -33,7 +33,7 @@ Three layers, from advisory to deterministic, all shipped as hooks:
 | describes the change | `// Added to support retries` | Delete; that is the commit message. |
 | section banner | `// ---- Helpers ----` | Delete; extract. |
 | commented-out code | `// const old = compute(x);` | Delete. |
-| budget | more than 10% of the change's non-blank lines are comments (and at least 3); the CLI measures the whole file | Delete restating and paraphrasing comments. |
+| budget | more than 10% of the change's non-blank lines are comments (and at least 3); the CLI measures the whole file unless `--base` scopes it to added lines | Delete restating and paraphrasing comments. |
 
 Never flagged: `TODO(#123)`, lint pragmas, shebangs, standards names such as `SHA-256` or `ISO-8601`, a units note the type cannot express (`/** Epoch ms. */ expiresAt?: number`), and any "why" comment that states a fact without naming a document.
 
@@ -51,7 +51,42 @@ Skipped: dotfiles, `*.config.*`, `*.d.ts`, `docs/`, `node_modules/`, `dist/`, ge
 - `COMMENT_GUARD=warn` turns blocks into advisory context and lets every edit land. `COMMENT_GUARD=off` disables every hook.
 - `~/.claude/comment-guard.json` or `<project>/.claude/comment-guard.json` overrides `maxCommentRatio`, `minCommentLines`, `exclude` (globs, added to the defaults), `referenceAllowlistPrefixes`, `skillMatch` (which skills get the addendum), and `policyFile` (your own policy text).
 - To target another skills plugin, change the `if` rule and the `UserPromptExpansion` matcher in `hooks/hooks.json` as well as `skillMatch`. `if` holds one permission rule with no list syntax, so a prefix such as `Skill(mattpocock-skills *)` is how a whole plugin is named.
-- Run it by hand: `node hooks/comment-guard.js src/**/*.ts` exits 1 on problems, `--json` gives structured output. This also works as a pre-commit or CI check under any agent.
+- Run it by hand: `node hooks/comment-guard.js src/**/*.ts` exits 1 on problems, 2 on a usage error, and 3 on a crash. `--json` gives structured output and `--format github` gives workflow-command annotations. `--base <commit>` judges only the lines added since that commit across every changed file, `--github-event` reads that commit from the GitHub event instead, `--scope all` audits every tracked source file, and `--paths` takes newline- or comma-separated globs, relative to the repository root, that narrow either run. This also works as a pre-commit check under any agent.
+
+## Use in CI
+
+The same scanner ships as a composite GitHub Action, so a pull request fails on the comments the hook would have refused locally. It judges only the lines the pull request adds, fetches the base commit itself when the checkout is shallow, annotates each finding on the diff, and writes a table to the job summary. No token or permission is needed.
+
+```yaml
+name: comment-guard
+
+on:
+  pull_request:
+  merge_group:
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: andrewferk/claude-plugins/plugins/comment-guard@comment-guard-v0.3.0
+        with:
+          scope: changed
+          base: ""
+          paths: ""
+          fail: "true"
+```
+
+Every input above is at its default and can be left out.
+
+| Input | Default | Effect |
+|---|---|---|
+| `scope` | `changed` | `changed` judges the lines added since the base; `all` audits every tracked source file. |
+| `base` | from the event | A commit sha to diff against. When empty it is the pull request's base as of the merge commit that was checked out (`pull_request` and `pull_request_target`), the `merge_group` base, or the commit before a `push`. A push of a new branch or a force-push has no base, and any other event has none at all, so those runs need `base` or `scope: all`. |
+| `paths` | every source file | Newline- or comma-separated globs, relative to the repository root, that narrow the file set. They never add back a file the exclude list removes. |
+| `fail` | `true` | `false` annotates and summarises but lets the job pass, for a repository adopting the policy gradually. A usage error or a crash still fails the job. |
+
+Policy settings come from the repository's `.claude/comment-guard.json`, the same file the hook reads, so the action and the hook cannot disagree. The runner needs Node 18 or later on the path, which GitHub's hosted runners provide. Pin the exact release tag; there is no floating major tag before 1.0.
 
 ## Tests
 
@@ -65,6 +100,7 @@ The fixtures in `test/fixtures/pr100` are files copied from [andrewferk/url-shor
 
 - The refusal before an edit reconstructs the file from the tool's input. For `Write` over an existing file, a line counts as added when the old file did not contain it verbatim, so a moved line is judged again.
 - The hooks never report a comment that predates the change, so a touched file can keep old violations. Run the CLI on it to see them all.
+- A `--base` run, and so the action, judges an untracked file whole, since every line of it is new. A workflow step that writes an unignored source file into the workspace before the action runs will have that file checked.
 - The `Stop` check covers the whole branch, not just the agent's edits. Once the session has edited a file or run a command, a violation you added by hand on the same branch is reported alongside the agent's.
 - The scanner is pattern-based. It cannot judge whether a comment that cites no document is worthwhile; the budget and the policy text carry that part.
 - Template literals, nested block comments, and raw strings in Rust or Python are handled approximately. A false positive is cheap to see in the report and can be excluded by path.
