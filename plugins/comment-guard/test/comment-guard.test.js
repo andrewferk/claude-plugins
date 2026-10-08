@@ -640,6 +640,8 @@ test("the CLI with --json reports each file's problems and budget, scoped to add
   assert.deepEqual(whole[0].problems.map((p) => p.line), [1, 3]);
   assert.equal(typeof whole[0].overBudget, "boolean");
   assert.equal(whole[0].commentLineNumbers, undefined, "line-number sets stay out of the JSON");
+  assert.equal(whole[0].language, "c");
+  assert.ok(Array.isArray(whole[0].comments), "the extracted comments stay in the JSON as in 0.2.0");
 
   const added = JSON.parse(spawnSync("node", [SCRIPT, "--json", "--base", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout);
   assert.deepEqual(added[0].problems.map((p) => p.line), [3]);
@@ -668,4 +670,28 @@ test("a pull_request run diffs against the merge commit's base, not the base the
   assert.equal(out.status, 1, out.stderr);
   assert.match(out.stdout, /feature\.ts:/);
   assert.doesNotMatch(out.stdout, /other\.ts/, "work merged to main after the event is not this pull request's");
+});
+
+test("the CLI refuses a flag without a value, and --base together with --scope all", () => {
+  const { dir, run } = gitRepo();
+  fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+  run("add", ".");
+  run("commit", "-q", "-m", "base");
+  for (const args of [["--base"], ["--scope"], ["--format"], ["--paths"], ["--base", "--scope", "all"]]) {
+    const out = spawnSync("node", [SCRIPT, ...args], { cwd: dir, encoding: "utf8" });
+    assert.equal(out.status, 2, args.join(" "));
+    assert.match(out.stderr, new RegExp(args[0]));
+  }
+  const both = spawnSync("node", [SCRIPT, "--base", "HEAD", "--scope", "all"], { cwd: dir, encoding: "utf8" });
+  assert.equal(both.status, 2);
+  assert.match(both.stderr, /--base/);
+  assert.match(both.stderr, /--scope all/);
+  const unknownFormat = spawnSync("node", [SCRIPT, "--format", "xml", "a.ts"], { cwd: dir, encoding: "utf8" });
+  assert.equal(unknownFormat.status, 2);
+});
+
+test("a scanner crash exits 3 so the action cannot mistake it for findings", () => {
+  const out = spawnSync("node", [SCRIPT, "--format", "github", path.join(FIXTURES, "short-code.ts")], { encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: path.join(os.tmpdir(), "comment-guard-missing-dir", "summary.md") } });
+  assert.equal(out.status, 3);
+  assert.match(out.stderr, /comment-guard/);
 });
