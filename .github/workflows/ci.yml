@@ -23,7 +23,15 @@ jobs:
             fi
           done
       - name: The repository passes its own comment scanner
-        run: node plugins/comment-guard/hooks/comment-guard.js $(git ls-files 'plugins/*/hooks/*.js' 'plugins/*/test/*.js')
+        uses: ./plugins/comment-guard
+        with:
+          scope: all
+          paths: |
+            plugins/*/hooks/*.js
+            plugins/*/test/*.js
+      - name: The pull request adds no comment that breaks the policy
+        if: github.event_name == 'pull_request'
+        uses: ./plugins/comment-guard
       - name: Validate the marketplace and every plugin manifest
         run: |
           npm install -g @anthropic-ai/claude-code
