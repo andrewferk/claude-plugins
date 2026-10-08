@@ -254,6 +254,96 @@ test("Stop scopes the comment budget to the lines added on the branch", () => {
   assert.equal(stop.stdout, "", "legacy comments outside the branch's added lines do not trip the budget");
 });
 
+test("PreToolUse refuses an edit whose added lines break the policy, before it lands", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  const legacy = "// Public surface of the package (ADR 0015).\nexport const a = 1;\n";
+  fs.writeFileSync(file, legacy);
+
+  const refused = runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "export const a = 1;\n", new_string: "export const a = 1;\n// per ADR 0002\nexport const b = 2;\n" }, cwd: dir });
+  const output = JSON.parse(refused.stdout).hookSpecificOutput;
+  assert.equal(output.hookEventName, "PreToolUse");
+  assert.equal(output.permissionDecision, "deny");
+  assert.match(output.permissionDecisionReason, /L3 cites a document: "per ADR 0002"/);
+  assert.doesNotMatch(output.permissionDecisionReason, /ADR 0015/, "the legacy citation is not the edit's problem");
+  assert.equal(fs.readFileSync(file, "utf8"), legacy, "the hook never touches the file");
+
+  const allowed = runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "export const a = 1;\n", new_string: "export const a = 1;\nexport const b = 2;\n" }, cwd: dir });
+  assert.equal(allowed.stdout, "", "a clean edit is not mentioned");
+
+  const unmatched = runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "not in the file", new_string: "// per ADR 0002\n" }, cwd: dir });
+  assert.equal(unmatched.stdout, "", "an edit the tool itself will reject is left to the tool");
+});
+
+test("PreToolUse judges a Write by the lines it would add", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  fs.writeFileSync(file, "// legacy note (ADR 0001)\nexport const a = 1;\n");
+
+  const rewritten = runHook({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: file, content: "// legacy note (ADR 0001)\nexport const a = 1;\n// Now we add b\nexport const b = 2;\n" }, cwd: dir });
+  const reason = JSON.parse(rewritten.stdout).hookSpecificOutput.permissionDecisionReason;
+  assert.match(reason, /L3 narrates the steps/);
+  assert.doesNotMatch(reason, /legacy note/);
+
+  const kept = runHook({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: file, content: "// legacy note (ADR 0001)\nexport const a = 1;\nexport const b = 2;\n" }, cwd: dir });
+  assert.equal(kept.stdout, "", "lines the file already had are not added");
+
+  const created = runHook({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: path.join(dir, "new.ts"), content: "// per ADR 0002\nexport const c = 3;\n" }, cwd: dir });
+  assert.match(JSON.parse(created.stdout).hookSpecificOutput.permissionDecisionReason, /L1 cites a document/);
+  assert.ok(!fs.existsSync(path.join(dir, "new.ts")));
+});
+
+test("PreToolUse applies every edit of a MultiEdit before judging", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  fs.writeFileSync(file, "export const a = 1;\nexport const b = 2;\n");
+  const edits = [
+    { old_string: "export const a = 1;\n", new_string: "export const a = 1;\n// see ticket #94\n" },
+    { old_string: "export const b = 2;\n", new_string: "export const b = 2;\nexport const c = 3;\n" },
+  ];
+  const refused = runHook({ hook_event_name: "PreToolUse", tool_name: "MultiEdit", tool_input: { file_path: file, edits }, cwd: dir });
+  const reason = JSON.parse(refused.stdout).hookSpecificOutput.permissionDecisionReason;
+  assert.match(reason, /L2 cites a document: "see ticket #94"/);
+  assert.doesNotMatch(reason, /L4/);
+});
+
+test("a refusal carries the policy the first time, and a clean edit leaves it for the read hook", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  fs.writeFileSync(file, "export const a = 1;\n");
+  const bad = { file_path: file, old_string: "export const a = 1;\n", new_string: "// Now we add b\nexport const b = 2;\n" };
+  const good = { file_path: file, old_string: "export const a = 1;\n", new_string: "export const b = 2;\n" };
+
+  const first = `pre-${process.pid}-${Date.now()}`;
+  const refused = runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: bad, cwd: dir, session_id: first });
+  assert.match(JSON.parse(refused.stdout).hookSpecificOutput.permissionDecisionReason, /# Code comments/);
+  const read = runHook({ hook_event_name: "PostToolUse", tool_name: "Read", tool_input: { file_path: file }, cwd: dir, session_id: first });
+  assert.equal(read.stdout, "", "the session has seen the policy");
+
+  const second = `${first}-b`;
+  assert.equal(runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: good, cwd: dir, session_id: second }).stdout, "");
+  const later = runHook({ hook_event_name: "PostToolUse", tool_name: "Read", tool_input: { file_path: file }, cwd: dir, session_id: second });
+  assert.match(JSON.parse(later.stdout).hookSpecificOutput.additionalContext, /# Code comments/, "an allowed edit does not spend the one-time policy");
+});
+
+test("COMMENT_GUARD=warn never refuses an edit", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
+  const file = path.join(dir, "thing.ts");
+  fs.writeFileSync(file, "export const a = 1;\n");
+  const result = runHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: file, old_string: "export const a = 1;\n", new_string: "// per ADR 0002\nexport const a = 1;\n" }, cwd: dir }, { COMMENT_GUARD: "warn" });
+  assert.equal(result.stdout, "");
+});
+
+test("hooks.json runs the script before and after every edit tool", () => {
+  const hooksJson = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "hooks", "hooks.json"), "utf8")).hooks;
+  for (const event of ["PreToolUse", "PostToolUse"]) {
+    const matcher = new RegExp(`^(${hooksJson[event][0].matcher})$`);
+    for (const tool of ["Edit", "Write", "MultiEdit"]) assert.ok(matcher.test(tool), `${event} does not cover ${tool}`);
+    for (const handler of hooksJson[event][0].hooks) assert.match(handler.command, /\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/comment-guard\.js/);
+  }
+  assert.doesNotMatch(hooksJson.PreToolUse[0].matcher, /Read/, "a read has nothing to refuse");
+});
+
 test("the policy is delivered once per session, on the first source file read or edited", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comment-guard-"));
   fs.writeFileSync(path.join(dir, "notes.md"), "# notes\n");

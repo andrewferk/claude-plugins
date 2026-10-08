@@ -393,7 +393,10 @@ function analyzeFile(filePath, config) {
   return analyzeSource(fs.readFileSync(filePath, "utf8"), filePath, config);
 }
 
-function formatReport(results, config, { addedLinesByFile } = {}) {
+const FIX_NOW = "Fix this now before continuing: delete the listed comments, and where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
+const REDO_EDIT = "The edit was not applied. Redo it without the listed comments; where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.";
+
+function formatReport(results, config, { addedLinesByFile, footer = FIX_NOW } = {}) {
   const sections = [];
   for (const result of results) {
     if (!result) continue;
@@ -415,7 +418,7 @@ function formatReport(results, config, { addedLinesByFile } = {}) {
   return [
     "comment-guard: the comment policy is not met.",
     ...sections,
-    "Fix this now before continuing: delete the listed comments, and where something was genuinely unclear, rename or extract instead. Do not rewrite a comment into a different comment that says the same thing.",
+    footer,
   ].join("\n");
 }
 
@@ -541,6 +544,59 @@ function linesContaining(content, snippets) {
     }
   }
   return found;
+}
+
+function handlePreToolUse(input, config, mode) {
+  if (mode === "warn") return;
+  const toolName = input.tool_name || "";
+  const toolInput = input.tool_input || {};
+  if (!/^(Edit|Write|MultiEdit)$/.test(toolName) || !toolInput.file_path) return;
+  const resolved = path.resolve(input.cwd || process.cwd(), toolInput.file_path);
+  if (!languageFor(resolved) || isExcluded(resolved, config)) return;
+  const current = fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : null;
+  const proposed = proposedFile(toolName, toolInput, current);
+  if (!proposed) return;
+  const result = analyzeSource(proposed.content, resolved, config);
+  const report = formatReport([result], config, { addedLinesByFile: new Map([[resolved, proposed.added]]), footer: REDO_EDIT });
+  if (!report) return;
+  const policy = policyDeliveredThisSession(input) ? null : firstSourceFileContext(config);
+  emit({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: [report, policy].filter(Boolean).join("\n\n"),
+    },
+  });
+}
+
+function proposedFile(toolName, toolInput, current) {
+  if (toolName === "Write") {
+    if (typeof toolInput.content !== "string") return null;
+    return { content: toolInput.content, added: current === null ? null : linesNotIn(toolInput.content, current) };
+  }
+  if (current === null) return null;
+  const edits = toolName === "MultiEdit" ? toolInput.edits || [] : [toolInput];
+  let content = current;
+  const inserted = [];
+  for (const edit of edits) {
+    if (typeof edit.old_string !== "string" || typeof edit.new_string !== "string") return null;
+    if (edit.old_string === "" ? content !== "" : !content.includes(edit.old_string)) return null;
+    content = edit.replace_all ? content.split(edit.old_string).join(edit.new_string) : content.replace(edit.old_string, () => edit.new_string);
+    if (edit.new_string !== "") inserted.push(edit.new_string);
+  }
+  return { content, added: linesContaining(content, inserted) };
+}
+
+function linesNotIn(content, previous) {
+  const remaining = new Map();
+  for (const line of previous.split("\n")) remaining.set(line, (remaining.get(line) || 0) + 1);
+  const added = new Set();
+  content.split("\n").forEach((line, index) => {
+    const left = remaining.get(line) || 0;
+    if (left > 0) remaining.set(line, left - 1);
+    else added.add(index + 1);
+  });
+  return added;
 }
 
 function firstSourceFileContext(config) {
@@ -698,6 +754,9 @@ function main() {
   const input = readStdin();
   const config = loadConfig(input.cwd || process.cwd());
   switch (input.hook_event_name) {
+    case "PreToolUse":
+      handlePreToolUse(input, config, mode);
+      break;
     case "PostToolUse":
       handlePostToolUse(input, config, mode);
       break;
